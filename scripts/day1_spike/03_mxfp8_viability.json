@@ -1,0 +1,19 @@
+{
+  "_note": "torchao 0.49.x renamed `float8_dynamic_activation_float8_weight` to a class-based config, AND the C extensions failed to load entirely (`Failed to load _C_mxfp8.so`, `_C_cutlass_90a.abi3.so`). Per the script's decision rule (DEFER on import error), MXFP8 is out of Phase 1.",
+  "model_path": "/workspace/models/dream-coder-7b-instruct",
+  "hardware": "RTX 5090 (Blackwell sm_120) + PyTorch nightly cu128",
+  "steps": 128,
+  "max_new_tokens": 128,
+  "torchao_c_extensions_loaded": false,
+  "torchao_c_extension_failures": [
+    "/venv/main/lib/python3.12/site-packages/torchao/_C_cutlass_90a.abi3.so",
+    "/venv/main/lib/python3.12/site-packages/torchao/_C_mxfp8.cpython-310-x86_64-linux-gnu.so"
+  ],
+  "error": "torchao import failed: ImportError: cannot import name 'float8_dynamic_activation_float8_weight' from 'torchao.quantization' (/venv/main/lib/python3.12/site-packages/torchao/quantization/__init__.py)",
+  "decision": "DEFER MXFP8 to Phase 2 (torchao not importable on this PyTorch nightly + Blackwell combo)",
+  "phase2_notes": [
+    "Re-evaluate when torchao stabilizes API + ships sm_120 C-extension wheels for nightly cu128.",
+    "Alternative fp8 paths to investigate in Phase 2: TransformerEngine (NVIDIA), torch native fp8 ops, or wait for official torchao Blackwell support.",
+    "We did not get to measure the bf16-vs-fp8 logit drift, since the model was never quantized."
+  ]
+}

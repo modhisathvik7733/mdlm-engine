@@ -1,0 +1,15 @@
+{
+  "_note": "Findings reconstructed from the printed summary on the user's RTX 5090 + nightly cu128 run. Per-op breakdowns (top10_cpu_ops, top10_cuda_ops) are omitted because they were not captured in the paste; the architecture decision rests on cpu_to_gpu_ratio + decision string, which are present and authoritative.",
+  "model_path": "/workspace/models/dream-coder-7b-instruct",
+  "hardware": "RTX 5090 (Blackwell sm_120) + PyTorch nightly cu128",
+  "steps": 256,
+  "max_new_tokens": 256,
+  "block_length": 32,
+  "wall_seconds": 10.95,
+  "profile_cpu_self_ms": 39219.6,
+  "profile_gpu_self_ms": 59000.6,
+  "cpu_to_gpu_ratio": 0.66,
+  "host_only_ms_estimate": 0.0,
+  "host_fraction_pct": 0.0,
+  "decision": "torch.compile is useful (~10-25% saving expected) — Phase 1 nice-to-have"
+}

@@ -1,0 +1,72 @@
+{
+  "llada_path": "GSAI-ML/LLaDA-8B-Base",
+  "mask_token": {
+    "str": "<|mdm_mask|>",
+    "id": 126336
+  },
+  "pad_token": {
+    "str": "<|endoftext|>",
+    "id": 126081
+  },
+  "eos_token": {
+    "str": "<|endoftext|>",
+    "id": 126081
+  },
+  "vocab_size": 126080,
+  "has_chat_template": true,
+  "chat_template_sample": "<|startoftext|><|start_header_id|>user<|end_header_id|>\n\nWrite add(a, b).<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+  "chat_template_first_50_token_ids": [
+    126080, 27, 91, 7351, 20679, 2983, 95591, 3840, 27, 91,
+    486, 20679, 2983, 95591, 198, 198, 11823, 1088, 5948, 11,
+    285, 931, 27, 91, 68, 335, 2983, 91, 3583, 91,
+    7351, 20679, 2983, 95591, 598, 10450, 27, 91, 486, 20679,
+    2983, 95591, 198, 198
+  ],
+  "model_type": "llada",
+  "hidden_size": 4096,
+  "num_hidden_layers": 32,
+  "num_attention_heads": 32,
+  "num_key_value_heads": null,
+  "head_dim": 128,
+  "forward_signature": [
+    "input_ids",
+    "inputs_embeds",
+    "attention_mask",
+    "attention_bias",
+    "past_key_values",
+    "labels",
+    "use_cache",
+    "output_attentions",
+    "output_hidden_states",
+    "return_dict",
+    "cache_position"
+  ],
+  "forward_accepts": {
+    "attention_mask": true,
+    "position_ids": false,
+    "past_key_values": true,
+    "use_cache": true,
+    "inputs_embeds": true
+  },
+  "logit_shift_test": {
+    "prompt": "def fib(n): return ",
+    "n_prompt_tokens": 6,
+    "argmax_at_pos_n_no_shift": 16,
+    "decoded_no_shift": "1",
+    "argmax_at_pos_n_minus_1_shifted": 220,
+    "decoded_shifted": " ",
+    "guidance": "If `decoded_no_shift` looks like a plausible next token (e.g. 'n', '1', 'fib') then LLaDA does NOT need shift_logits (identity). If `decoded_shifted` looks plausible and `decoded_no_shift` doesn't, LLaDA needs the same shift Dream uses (cat([logits[:, :1], logits[:, :-1]], dim=1)). Inspect by hand and record the verdict in this JSON manually."
+  },
+  "abc_verdict": {
+    "fits": true,
+    "shift_logits_verdict": "identity (no shift) — decoded_no_shift='1' is plausible, decoded_shifted=' ' is not",
+    "notes": [
+      "ABC's six methods cover LLaDA cleanly without modification.",
+      "build_position_ids() returns None (LLaDA's forward signature lacks position_ids).",
+      "shift_logits() is identity (LLaDA predicts directly at masked positions).",
+      "attention_bias is a LLaDA-specific kwarg; adapter handles it inside forward(), engine never sees it.",
+      "num_key_value_heads is null in LLaDA's config — ABC's n_kv_heads property must fall back to num_attention_heads=32 (TODO: tighten the property to handle the None-not-just-missing case).",
+      "Dream uses shift-right shift_logits; LLaDA uses identity. Both fit the same ABC because shift_logits is a *method*, not a flag."
+    ]
+  }
+}
