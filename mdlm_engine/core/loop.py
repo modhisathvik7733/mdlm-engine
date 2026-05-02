@@ -32,8 +32,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import torch
-
 if TYPE_CHECKING:
     from mdlm_engine.adapters.base import ModelAdapter
     from mdlm_engine.cache.base import DiffusionCache
@@ -70,41 +68,45 @@ def generate_block(
 
     Mutates ``cache`` in place via ``replace_at`` (per-step) and ``commit``
     (when the scheduler decides).
+
+    **Phase-1 forward strategy:** the model sees the FULL sequence
+    (prompt + previous blocks + current block + future masks) every step.
+    This recomputes K/V for every position each step — slower than
+    fast_dllm's `dual_cache`, but correct and model-agnostic. The
+    DiffusionCache stays as engine-side bookkeeping (commit-state, etc.)
+    but is not yet wired into the model's `past_key_values` arg. That
+    wiring is Phase 2 — and is also where the actual speedup comes from.
     """
     forwards = 0
     block_start, block_end = state.block_start, state.block_end
-    block_len = block_end - block_start
 
     for step in range(cfg.steps_per_block):
+        # Mask check is on the active block only — that's where we sample/commit.
         active_ids = state.x[:, block_start:block_end]
         mask_index = active_ids == adapter.mask_token_id  # [B, block_len]
         if not bool(mask_index.any()):
             break
 
-        # Build the model inputs the adapter expects.
+        # Forward sees the FULL sequence. Bidirectional attention; the model
+        # doesn't know about block boundaries — it's just one big masked-LM pass.
         position_ids = adapter.build_position_ids(state.x, state.attn_mask_1d)
-        if position_ids is not None:
-            position_ids = position_ids[:, block_start:block_end]
-        attn_mask = cache.attention_mask_for_step(
-            torch.arange(block_start, block_end, device=state.x.device),
-        )
-        if isinstance(attn_mask, str) and attn_mask == "bidirectional":
-            attn_mask = adapter.build_attention_mask(state.attn_mask_1d, state.x.shape[1])
+        attn_mask = adapter.build_attention_mask(state.attn_mask_1d, state.x.shape[1])
 
         out = adapter.forward(
-            input_ids=active_ids,
+            input_ids=state.x,
             attention_mask=attn_mask,
             position_ids=position_ids,
             diffusion_cache=cache,
-            use_cache=True,
+            use_cache=False,
         )
         forwards += 1
 
-        # Sampler operates only on currently-masked positions.
-        # logits shape: [B, block_len, V]
-        logits = out.logits  # adapter has already applied shift_logits
+        # Slice logits down to the active block before sampling — only block
+        # positions are eligible to commit this step.
+        full_logits = out.logits  # [B, L, V]; adapter already applied shift_logits
+        block_logits = full_logits[:, block_start:block_end, :]   # [B, block_len, V]
         flat_mask = mask_index.flatten()
-        flat_logits = logits.reshape(-1, logits.shape[-1])[flat_mask]
+        flat_logits = block_logits.reshape(-1, block_logits.shape[-1])[flat_mask]
         confidences, candidates = sampler(
             flat_logits,
             temperature=cfg.temperature,
