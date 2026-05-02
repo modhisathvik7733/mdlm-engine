@@ -2,7 +2,16 @@
 
 A **model-agnostic Python inference engine for masked diffusion language models** — Dream-Coder, DiffuCoder, LLaDA, and any future masked diffusion LM that fits the adapter contract.
 
-> **Status: Phase 1 code-complete (Days 1-7).** Acceptance gate (Days 8-9) requires a GPU run; see [`scripts/phase1_acceptance.sh`](scripts/phase1_acceptance.sh). 92 unit tests passing on CPU.
+> **Status: v0.1.0** — acceptance gate passed on RTX 5090 / PyTorch nightly cu128.
+
+## Phase-1 acceptance results (HumanEval+ subset, limit=20)
+
+| Model | Adapter LOC | pass@1 single-shot | s/problem | tokens/sec | Peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| `Dream-org/Dream-Coder-v0-Instruct-7B` | 185 | **0.900** (18/20) | 9.9 | 22 | 22 GB |
+| `GSAI-ML/LLaDA-8B-Base` | 197 | **0.500** (10/20) | 12.6 | 20 | 23 GB |
+
+Same engine code, same harness invocation; only the registered adapter differs. **92 CPU unit tests + 100-generation NaN-freedom + adapter-LOC + `pytest` contract all green.** See [`scripts/phase1_acceptance.sh`](scripts/phase1_acceptance.sh) and the [Phase-1 plan](https://github.com/modhisathvik7733/mdlm-engine).
 
 ## Why this exists
 
@@ -39,12 +48,18 @@ Speed is the *validation* that portability didn't cost us anything — not the h
 
 ## Roadmap
 
-| Version | Phase | Theme | Target |
-|---|---|---|---|
-| **v0.1.0** | Phase 1 | dKV-Cache + slowfast scheduler + Blackwell HW opts + 2 adapters | fast_dllm parity (≈ 8 s/problem on Dream HE+ subset) at 0.55 single-shot pass@1 |
-| v0.2.0 | Phase 2 | Self-speculative decoding (arxiv [2510.04147](https://arxiv.org/abs/2510.04147)) | ≤ 2.5 s/problem, ≥ 0.62 single-shot pass@1 |
+| Version | Phase | Theme | Target | Status |
+|---|---|---|---|---|
+| **v0.1.0** | Phase 1 | Engine + adapters (Dream + LLaDA) + cache (block + dkv) + scheduler (uniform + confidence + slowfast) + 5 samplers + ops | model-agnostic + correct generation + Dream pass@1 ≥0.55 single-shot | **shipped** |
+| v0.2.0 | Phase 2 | **Model-side `past_key_values` plumbing** + self-speculative decoding (arxiv [2510.04147](https://arxiv.org/abs/2510.04147)) | **target ≤ 4 s/problem (~2.5× faster than v0.1.0)**, ≥ 0.62 single-shot pass@1 |
 | v0.3.0 | Phase 3 | Continuous batching | ≥ 3× throughput at batch 8 |
 | v0.4.0 | Phase 4 | Sparse cache eviction (arxiv [2508.02558](https://arxiv.org/abs/2508.02558)) | long-context wins; 1.4× larger feasible batch at same VRAM |
+
+## v0.1.0 known limitation (drives the v0.2.0 work)
+
+**The model recomputes K/V every diffusion step.** Phase 1 keeps the cache engine-side (commit-state bookkeeping in `DiffusionCache`) but doesn't yet pass `past_key_values` into the model. So v0.1.0 lands at fast_dllm-without-`dual_cache` speed (~10-12 s/problem on RTX 5090 for 7B at 256-token output), not fast_dllm-with-dual_cache speed (~8 s).
+
+Phase 2 fixes this by wiring `DiffusionCache` into the adapter's `forward()` as the model's `past_key_values` argument. That alone should hit ≈4 s/problem; self-speculative decoding stacks on top for another ~1.5-2× win.
 
 See [`/Users/chintu/.claude/plans/jazzy-tickling-brook.md`](file:///Users/chintu/.claude/plans/jazzy-tickling-brook.md) for the full plan.
 
