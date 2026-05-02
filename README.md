@@ -2,7 +2,7 @@
 
 A **model-agnostic Python inference engine for masked diffusion language models** — Dream-Coder, DiffuCoder, LLaDA, and any future masked diffusion LM that fits the adapter contract.
 
-> **Status: Pre-alpha.** Phase 1 in development. Not yet shippable.
+> **Status: Phase 1 code-complete (Days 1-7).** Acceptance gate (Days 8-9) requires a GPU run; see [`scripts/phase1_acceptance.sh`](scripts/phase1_acceptance.sh). 92 unit tests passing on CPU.
 
 ## Why this exists
 
@@ -47,6 +47,46 @@ Speed is the *validation* that portability didn't cost us anything — not the h
 | v0.4.0 | Phase 4 | Sparse cache eviction (arxiv [2508.02558](https://arxiv.org/abs/2508.02558)) | long-context wins; 1.4× larger feasible batch at same VRAM |
 
 See [`/Users/chintu/.claude/plans/jazzy-tickling-brook.md`](file:///Users/chintu/.claude/plans/jazzy-tickling-brook.md) for the full plan.
+
+## Running the Phase-1 acceptance gate
+
+On a vast.ai (or similar) GPU box with CUDA + PyTorch nightly:
+
+```bash
+git clone https://github.com/modhisathvik7733/mdlm-engine.git
+cd mdlm-engine
+pip install --break-system-packages -e ".[bench,test]"
+
+# Optional: run the three Day-1 spike scripts first (architecture-freeze evidence,
+# already committed to scripts/day1_spike/*.json):
+bash scripts/day1_spike/00_setup_fast_dllm.sh   # if not already done
+python3 scripts/day1_spike/01_llada_spike.py --llada_path GSAI-ML/LLaDA-8B-Base
+python3 scripts/day1_spike/02_host_overhead_profile.py --model_path /workspace/models/dream-coder-7b-instruct
+python3 scripts/day1_spike/03_mxfp8_viability.py --model_path /workspace/models/dream-coder-7b-instruct
+
+# The actual Phase-1 acceptance gate (~2-3 hours of GPU time):
+bash scripts/phase1_acceptance.sh
+```
+
+The gate runs:
+
+1. `pytest tests/` — all green (92 CPU + 2 GPU contract tests).
+2. Dream-Coder benchmark on HumanEval+ subset, single-shot AND best-of-8.
+3. LLaDA portability smoke (same engine code, different adapter).
+4. Adapter LOC check (each ≤ 200 LOC).
+5. NaN-freedom (100 generations at temperature 0, zero NaN logits).
+
+Acceptance thresholds (from the v2 plan):
+
+```
+Dream single-shot pass@1  ≥ 0.55     speed ≤ 8 s/problem (≈ fast_dllm parity)
+Dream best-of-8 pass@1    ≥ 0.85
+LLaDA smoke pass@1        ≥ 0.40
+NaN count                  = 0
+Adapter LOC each          ≤ 200
+```
+
+If all green → tag `v0.1.0` and ship.
 
 ## Honest non-goals
 
