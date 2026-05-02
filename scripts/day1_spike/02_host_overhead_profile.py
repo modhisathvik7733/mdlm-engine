@@ -1,0 +1,179 @@
+"""Day-1 Spike #2 — Host overhead profile.
+
+Goal: measure what fraction of wall time is spent in Python / framework code
+vs actual GPU compute, on a vanilla 256-step Dream-Coder generation.
+
+Decision rule (from plan §"Phase 1 Day-1 critical work"):
+    host_fraction > 30%  →  torch.compile(reduce-overhead) + static padding
+                            is LOAD-BEARING in Phase 1.
+    host_fraction ≤ 30%  →  torch.compile is a Phase-1 nice-to-have.
+
+Output: JSON with timings.
+
+Note: at 512 forwards × ~50-200 μs Python launch overhead each, host time can
+easily be 25-100 ms even when GPU compute is fast. On RTX 5090 this might
+be the difference between 8 s/problem and 4 s/problem.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import torch
+from torch.profiler import ProfilerActivity, profile, record_function
+from transformers import AutoModel, AutoTokenizer
+
+
+def total_self_time_ms(prof: profile, device: str) -> float:
+    """Sum self-time of all events on the given device. Returns milliseconds."""
+    events = prof.key_averages()
+    total_us = 0.0
+    for e in events:
+        if device == "cpu":
+            total_us += e.cpu_time_total
+        elif device == "cuda":
+            total_us += getattr(e, "device_time_total", e.cuda_time_total)
+        else:
+            raise ValueError(device)
+    return total_us / 1000.0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model_path", required=True,
+                    help="Path or HF repo id of a Dream-architecture diffusion LM.")
+    ap.add_argument("--prompt", default=(
+        "Write a Python function `fib(n)` that returns the n-th Fibonacci "
+        "number using memoization. Return only the function definition in a "
+        "```python code block."
+    ))
+    ap.add_argument("--steps", type=int, default=256)
+    ap.add_argument("--max_new_tokens", type=int, default=256)
+    ap.add_argument("--block_length", type=int, default=32)
+    ap.add_argument("--out", type=Path, default=Path("scripts/day1_spike/02_host_overhead_profile.json"))
+    args = ap.parse_args()
+
+    print(f"Loading {args.model_path} ...")
+    tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    model = AutoModel.from_pretrained(
+        args.model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+    ).to("cuda").eval()
+
+    # ----- prompt -----
+    if hasattr(tok, "apply_chat_template") and tok.chat_template:
+        inputs = tok.apply_chat_template(
+            [{"role": "user", "content": args.prompt}],
+            return_tensors="pt", return_dict=True, add_generation_prompt=True,
+        )
+        input_ids = inputs.input_ids.to("cuda")
+        attention_mask = inputs.attention_mask.to("cuda")
+    else:
+        # Manual <|im_start|>...<|im_end|> for Dream-Coder if no template.
+        prompt_text = (
+            f"<|im_start|>user\n{args.prompt}<|im_end|>\n<|im_start|>assistant\n"
+        )
+        inp = tok(prompt_text, return_tensors="pt").to("cuda")
+        input_ids = inp.input_ids
+        attention_mask = inp.attention_mask
+
+    gen_kwargs = dict(
+        attention_mask=attention_mask,
+        max_new_tokens=args.max_new_tokens,
+        steps=args.steps,
+        temperature=0.0,
+        top_p=0.95,
+        alg="entropy",
+        alg_temp=0.0,
+        output_history=False,
+        return_dict_in_generate=True,
+    )
+
+    # ----- warmup -----
+    print("Warmup pass (not measured) ...")
+    with torch.no_grad():
+        _ = model.diffusion_generate(input_ids, **gen_kwargs)
+
+    # ----- timed wall clock -----
+    print("Wall-clock pass ...")
+    torch.cuda.synchronize()
+    t0 = time.time()
+    with torch.no_grad():
+        _ = model.diffusion_generate(input_ids, **gen_kwargs)
+    torch.cuda.synchronize()
+    wall_s = time.time() - t0
+    print(f"  wall: {wall_s:.2f}s")
+
+    # ----- profile -----
+    print("Profiled pass (slower due to instrumentation; use for ratios only) ...")
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+    with profile(activities=activities, record_shapes=False, with_stack=False) as prof:
+        with record_function("diffusion_generate"):
+            with torch.no_grad():
+                _ = model.diffusion_generate(input_ids, **gen_kwargs)
+        torch.cuda.synchronize()
+
+    cpu_ms = total_self_time_ms(prof, "cpu")
+    gpu_ms = total_self_time_ms(prof, "cuda")
+    # Heuristic: host overhead = cpu_ms - max(0, cpu_ms - gpu_ms)
+    # The cleaner read: host time NOT overlapped with GPU.
+    # Treat that as cpu_ms when it exceeds gpu_ms (since CPU has to wait).
+    overlap_ms = min(cpu_ms, gpu_ms)
+    host_only_ms = cpu_ms - overlap_ms
+    host_fraction = (host_only_ms / (host_only_ms + gpu_ms)) if (host_only_ms + gpu_ms) > 0 else 0.0
+
+    # Top 10 ops by CPU time and CUDA time (informational).
+    top_cpu = sorted(prof.key_averages(), key=lambda e: e.cpu_time_total, reverse=True)[:10]
+    top_cuda = sorted(
+        prof.key_averages(),
+        key=lambda e: getattr(e, "device_time_total", e.cuda_time_total),
+        reverse=True,
+    )[:10]
+
+    findings: dict = {
+        "model_path": args.model_path,
+        "steps": args.steps,
+        "max_new_tokens": args.max_new_tokens,
+        "block_length": args.block_length,
+        "wall_seconds": wall_s,
+        "profile_cpu_self_ms": cpu_ms,
+        "profile_gpu_self_ms": gpu_ms,
+        "host_only_ms_estimate": host_only_ms,
+        "host_fraction_pct": host_fraction * 100.0,
+        "decision": (
+            "torch.compile + static padding is LOAD-BEARING in Phase 1"
+            if host_fraction > 0.3
+            else "torch.compile is a nice-to-have in Phase 1"
+        ),
+        "top10_cpu_ops": [
+            {"op": e.key, "cpu_time_ms": e.cpu_time_total / 1000.0,
+             "count": e.count}
+            for e in top_cpu
+        ],
+        "top10_cuda_ops": [
+            {"op": e.key,
+             "gpu_time_ms": getattr(e, "device_time_total", e.cuda_time_total) / 1000.0,
+             "count": e.count}
+            for e in top_cuda
+        ],
+    }
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(findings, indent=2))
+    print(f"\nProfile written to {args.out}\n")
+    print("=" * 60)
+    print("Profile summary:")
+    print("=" * 60)
+    print(f"  wall:                   {wall_s:.2f} s")
+    print(f"  profile CPU self time:  {cpu_ms:.1f} ms")
+    print(f"  profile GPU self time:  {gpu_ms:.1f} ms")
+    print(f"  estimated host-only:    {host_only_ms:.1f} ms")
+    print(f"  host fraction:          {host_fraction * 100:.1f}%")
+    print(f"  → {findings['decision']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

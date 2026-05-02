@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Data / artifacts (we don't commit weights, datasets, or bench outputs)
+*.safetensors
+*.bin
+*.pt
+checkpoints/
+results/
+runs/
+wandb/
+
+# OS
+.DS_Store

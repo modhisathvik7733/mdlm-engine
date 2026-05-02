@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdlm-engine"
+version = "0.0.1.dev0"
+description = "A model-agnostic Python inference engine for masked diffusion language models."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sathvik Modhi", email = "modhisathvik@gmail.com" }]
+keywords = ["diffusion", "language-model", "inference", "masked-diffusion", "kv-cache", "dkv", "llada", "dream-coder"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Phase 1 dependencies. Pinned to a tested range for transformers because
+# the `Cache` API drifts between minor versions (see plan §Risks).
+dependencies = [
+    "torch>=2.6.0",
+    "transformers>=4.46,<4.50",
+    "accelerate>=0.34",
+    "huggingface_hub>=0.24",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+quant = [
+    # Phase 1 hardware-opt path — MXFP8 on Blackwell.
+    # PyTorch blog (July 2025): MXFP8 ships sm_120 in torchao.
+    "torchao>=0.7.0",
+]
+bench = [
+    "evalplus>=0.3.0",
+]
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+dev = [
+    "mdlm-engine[quant,bench,test]",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/modhisathvik7733/mdlm-engine"
+Issues = "https://github.com/modhisathvik7733/mdlm-engine/issues"
+
+[tool.setuptools.packages.find]
+include = ["mdlm_engine*"]
+exclude = ["tests*", "scripts*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+ignore = ["E501"]   # line length handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "adapter_validation: hard contract for adapters (logit alignment, equivalence, NaN-freedom)",
+    "gpu: requires a CUDA GPU",
+    "slow: takes >30s",
+]
