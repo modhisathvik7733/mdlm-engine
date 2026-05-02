@@ -76,8 +76,22 @@ class DiffusionEngine:
             - 'none'  — no caching; every step recomputes everything.
             - 'block' — `BlockCache`; recompute the active block each step.
             - 'dkv'   — `DKVCache`; recompute only currently-masked positions.
+
+        Phase 1 also assumes the adapter's K/V layout is HF_LEGACY_KV_BLD
+        (raw (K, V) tuples with shape [B, n_kv, L, d_h]). Adapters that
+        advertise a different layout will raise here so the abstraction
+        leak is caught at construction, not at the first forward.
         """
+        from mdlm_engine.adapters.base import CacheLayout
+
         layout = self.adapter.cache_layout()
+        if layout != CacheLayout.HF_LEGACY_KV_BLD:
+            raise NotImplementedError(
+                f"Phase-1 caches only support CacheLayout.HF_LEGACY_KV_BLD; "
+                f"adapter {type(self.adapter).__name__} reported {layout!r}. "
+                f"Add layout-specific allocation to _build_cache before shipping "
+                f"this adapter."
+            )
         kwargs = dict(
             n_layers=self.adapter.n_layers,
             n_kv_heads=self.adapter.n_kv_heads,
@@ -149,14 +163,19 @@ class DiffusionEngine:
         B, L_p = prompt_ids.shape
         L_max = L_p + max_new_tokens
 
-        # Pad x with mask tokens. attn_mask 1=real, 0=padding.
+        # Pad x with mask tokens. For masked diffusion, attn_mask is 1 EVERYWHERE
+        # — including at mask-token positions — because the model attends
+        # bidirectionally over the entire sequence (prompt + masks + future).
+        # Setting attn_mask=0 at masked positions makes the model ignore them
+        # and produces gibberish. Verified convention from fast_dllm:
+        #   modeling_dream.py:482-484  pads attention_mask with VALUE=1.0
+        #   sft_dataset.py:147-149     `torch.ones(...)  # NOTE: we use 1 here`
         x = torch.full(
             (B, L_max), self.adapter.mask_token_id,
             dtype=torch.long, device=device,
         )
         x[:, :L_p] = prompt_ids
-        attn_mask_1d = torch.zeros(B, L_max, dtype=torch.long, device=device)
-        attn_mask_1d[:, :L_p] = 1
+        attn_mask_1d = torch.ones(B, L_max, dtype=torch.long, device=device)
 
         cache = self._build_cache(batch_size=B, max_length=L_max)
         state = GenerationState(
@@ -194,8 +213,8 @@ class DiffusionEngine:
                     "x_snapshot": state.x.clone().cpu(),
                 })
 
-            # Update attn_mask for the just-finalized block (now real tokens).
-            attn_mask_1d[:, state.block_start:state.block_end] = 1
+            # No attn_mask update needed: it's already all-1s by construction
+            # (masked-diffusion convention; mask tokens are valid attendees).
 
             # Check EOS in the just-finalized block.
             block_slice = state.x[:, state.block_start:state.block_end]
