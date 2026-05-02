@@ -27,15 +27,30 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from transformers import AutoModel, AutoTokenizer
 
 
+def _gpu_time_us(e) -> float:
+    """Read GPU self-time off a profiler event, handling the PyTorch rename.
+
+    PyTorch >= ~2.4 renamed `cuda_time_total` → `device_time_total`. Some
+    nightly builds drop the legacy attribute entirely, so a getattr() with
+    eager fallback like `getattr(e, 'device_time_total', e.cuda_time_total)`
+    crashes — the fallback is evaluated even when the new attr exists.
+    """
+    if hasattr(e, "device_time_total"):
+        return float(e.device_time_total)
+    if hasattr(e, "cuda_time_total"):
+        return float(e.cuda_time_total)
+    return 0.0
+
+
 def total_self_time_ms(prof: profile, device: str) -> float:
     """Sum self-time of all events on the given device. Returns milliseconds."""
     events = prof.key_averages()
     total_us = 0.0
     for e in events:
         if device == "cpu":
-            total_us += e.cpu_time_total
+            total_us += float(e.cpu_time_total)
         elif device == "cuda":
-            total_us += getattr(e, "device_time_total", e.cuda_time_total)
+            total_us += _gpu_time_us(e)
         else:
             raise ValueError(device)
     return total_us / 1000.0
@@ -128,7 +143,7 @@ def main() -> int:
     top_cpu = sorted(prof.key_averages(), key=lambda e: e.cpu_time_total, reverse=True)[:10]
     top_cuda = sorted(
         prof.key_averages(),
-        key=lambda e: getattr(e, "device_time_total", e.cuda_time_total),
+        key=_gpu_time_us,
         reverse=True,
     )[:10]
 
@@ -154,7 +169,7 @@ def main() -> int:
         ],
         "top10_cuda_ops": [
             {"op": e.key,
-             "gpu_time_ms": getattr(e, "device_time_total", e.cuda_time_total) / 1000.0,
+             "gpu_time_ms": _gpu_time_us(e) / 1000.0,
              "count": e.count}
             for e in top_cuda
         ],
