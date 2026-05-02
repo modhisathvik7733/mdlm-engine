@@ -53,7 +53,10 @@ def main() -> int:
         )
         prompt_inputs = tok(prompt_text, return_tensors="pt", return_attention_mask=True)
     input_ids = prompt_inputs.input_ids.to("cuda")
-    attention_mask = prompt_inputs.attention_mask.to("cuda")
+    # PyTorch nightly (cu128) tightened SDPA mask dtype checking — `long` is
+    # no longer accepted, must be bool or float. `apply_chat_template`/
+    # tokenizer return long; cast to bool (1->True, 0->False).
+    attention_mask = prompt_inputs.attention_mask.to("cuda").bool()
 
     # ----- baseline (bf16) -----
     print("Loading bf16 baseline ...")

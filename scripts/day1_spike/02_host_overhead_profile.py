@@ -132,12 +132,21 @@ def main() -> int:
 
     cpu_ms = total_self_time_ms(prof, "cpu")
     gpu_ms = total_self_time_ms(prof, "cuda")
-    # Heuristic: host overhead = cpu_ms - max(0, cpu_ms - gpu_ms)
-    # The cleaner read: host time NOT overlapped with GPU.
-    # Treat that as cpu_ms when it exceeds gpu_ms (since CPU has to wait).
-    overlap_ms = min(cpu_ms, gpu_ms)
-    host_only_ms = cpu_ms - overlap_ms
-    host_fraction = (host_only_ms / (host_only_ms + gpu_ms)) if (host_only_ms + gpu_ms) > 0 else 0.0
+    # Heuristic: how much would `torch.compile(reduce-overhead)` realistically
+    # save? Empirically that's roughly proportional to the CPU/GPU ratio:
+    #   - cpu_ms << gpu_ms  → CPU never blocks GPU; compile saves <5%.
+    #   - cpu_ms ≈ gpu_ms   → significant overlap; compile saves 10-20%.
+    #   - cpu_ms > gpu_ms   → CPU is the bottleneck; compile saves 25%+.
+    # We report the ratio plainly and let the human read it; the previous
+    # "host_only = cpu - min(cpu, gpu)" formula collapsed to 0 whenever
+    # CPU ≤ GPU, which is misleadingly clean.
+    cpu_to_gpu_ratio = cpu_ms / gpu_ms if gpu_ms > 0 else float("inf")
+    # Approximate "fraction of wall time that's host work waiting on nothing":
+    # if CPU > GPU, the excess is pure host stall; otherwise CPU work overlaps.
+    host_only_ms = max(0.0, cpu_ms - gpu_ms)
+    # Wall fraction: host_only / max_resource (the bottleneck).
+    bottleneck_ms = max(cpu_ms, gpu_ms)
+    host_fraction = host_only_ms / bottleneck_ms if bottleneck_ms > 0 else 0.0
 
     # Top 10 ops by CPU time and CUDA time (informational).
     top_cpu = sorted(prof.key_averages(), key=lambda e: e.cpu_time_total, reverse=True)[:10]
@@ -147,6 +156,14 @@ def main() -> int:
         reverse=True,
     )[:10]
 
+    # Decision rule based on cpu/gpu ratio (the real signal, per plan):
+    if cpu_to_gpu_ratio > 1.5:
+        decision = "torch.compile + static padding is LOAD-BEARING in Phase 1 (CPU dominates)"
+    elif cpu_to_gpu_ratio > 0.5:
+        decision = "torch.compile is useful (~10-25% saving expected) — Phase 1 nice-to-have"
+    else:
+        decision = "torch.compile is marginal (<10% saving expected) — defer to Phase 2"
+
     findings: dict = {
         "model_path": args.model_path,
         "steps": args.steps,
@@ -155,13 +172,10 @@ def main() -> int:
         "wall_seconds": wall_s,
         "profile_cpu_self_ms": cpu_ms,
         "profile_gpu_self_ms": gpu_ms,
+        "cpu_to_gpu_ratio": cpu_to_gpu_ratio,
         "host_only_ms_estimate": host_only_ms,
         "host_fraction_pct": host_fraction * 100.0,
-        "decision": (
-            "torch.compile + static padding is LOAD-BEARING in Phase 1"
-            if host_fraction > 0.3
-            else "torch.compile is a nice-to-have in Phase 1"
-        ),
+        "decision": decision,
         "top10_cpu_ops": [
             {"op": e.key, "cpu_time_ms": e.cpu_time_total / 1000.0,
              "count": e.count}
@@ -184,6 +198,7 @@ def main() -> int:
     print(f"  wall:                   {wall_s:.2f} s")
     print(f"  profile CPU self time:  {cpu_ms:.1f} ms")
     print(f"  profile GPU self time:  {gpu_ms:.1f} ms")
+    print(f"  cpu/gpu ratio:          {cpu_to_gpu_ratio:.2f}")
     print(f"  estimated host-only:    {host_only_ms:.1f} ms")
     print(f"  host fraction:          {host_fraction * 100:.1f}%")
     print(f"  → {findings['decision']}")
