@@ -12,5 +12,6 @@ Why an internal ABC instead of subclassing `transformers.cache_utils.Cache`:
 - See plan §"Why not subclass HF Cache".
 """
 from mdlm_engine.cache.base import DiffusionCache, NoOpCache
+from mdlm_engine.cache.block import BlockCache
 
-__all__ = ["DiffusionCache", "NoOpCache"]
+__all__ = ["DiffusionCache", "NoOpCache", "BlockCache"]
