@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -34,6 +37,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch
+
+
+# Regex that pulls the first/longest python block out of an LLM completion.
+# Same pattern used in the user's existing eval_diverse_fastdllm.py.
+_CODE_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +216,17 @@ def _run_benchmark(args, result: BenchResult) -> int:
             out.sequences[0, prompt_ids.shape[1]:].cpu().tolist(),
             skip_special_tokens=True,
         )
-        if _check_completion(decoded, row):
+        passed = _check_completion(decoded, row)
+        if passed:
             n_pass += 1
+
+        # Print the first 3 completions so we can debug "0% pass@1" at a glance.
+        if i < 3:
+            print(f"\n--- problem {i} ({task_id}) — passed={passed} ---")
+            print(f"prompt[:200]: {row['prompt'][:200]!r}")
+            print(f"completion[:400]: {decoded[:400]!r}")
+            print(f"extracted code[:400]: {_extract_code(decoded)[:400]!r}")
+            print(f"--- end problem {i} ---\n")
 
         if (i + 1) % 5 == 0:
             elapsed = time.time() - t_start
@@ -239,18 +256,54 @@ def _format_prompt(humaneval_prompt: str) -> str:
     )
 
 
+def _extract_code(text: str) -> str:
+    """Pull the first/longest python block out of an LLM completion.
+
+    LLMs are asked to wrap solutions in `````python ... `````;
+    we extract the contents. If no block is found we fall back to the raw text
+    (lets the model still pass when it forgets the wrapper).
+    """
+    blocks = _CODE_RE.findall(text)
+    return max(blocks, key=len).strip() if blocks else text.strip()
+
+
 def _check_completion(decoded: str, row) -> bool:
-    """Run the HumanEval+ test for this problem. Phase 1 stub uses
-    `evalplus`'s `eval_correctness` if available."""
-    try:
-        from evalplus.evaluate import check_correctness
-    except ImportError:
+    """Execute ``code + row['test']`` in a subprocess; pass if ``check(entry_point)``
+    runs without raising.
+
+    Mirrors the proven pattern from
+    ``diffucoder_experiments/.../bench/eval_diverse_fastdllm.py::run_test``.
+    Replaces an earlier brittle path that called
+    ``evalplus.evaluate.check_correctness`` with a stale signature and silently
+    returned False on any exception.
+
+    Failure modes that legitimately return False:
+      - subprocess timeout (test hung)
+      - ``check(...)`` raises (assertion failure → wrong answer)
+      - generated code has SyntaxError → import-time crash before ``check``
+      - empty generation → ``__OK__`` not in stdout
+
+    Successful pass: stdout contains the literal sentinel ``__OK__``.
+    """
+    code = _extract_code(decoded)
+    test_code = row.get("test", "")
+    entry_point = row.get("entry_point", "")
+    if not code or not test_code or not entry_point:
         return False
+    full = (
+        code + "\n\n" + test_code
+        + f"\n\ntry:\n    check({entry_point})\n    print('__OK__')\nexcept Exception: pass\n"
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(full)
+        path = f.name
     try:
-        result = check_correctness(
-            problem=row, completion=decoded, expected_output=None, timeout=10.0,
+        p = subprocess.run(
+            ["python3", path], capture_output=True, text=True, timeout=10,
         )
-        return bool(result.get("passed"))
+        return "__OK__" in p.stdout
+    except subprocess.TimeoutExpired:
+        return False
     except Exception:
         return False
 
