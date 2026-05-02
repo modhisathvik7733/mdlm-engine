@@ -117,6 +117,7 @@ class DreamAdapter(ModelAdapter):
         attention_mask_1d: torch.Tensor | None,
     ) -> torch.Tensor | None:
         """``cumsum(attn_mask) - 1`` clamped at 0 — Dream's convention."""
+        del input_ids  # ABC-mandated; Dream's positions derive from attn_mask only
         if attention_mask_1d is None:
             return None
         positions = torch.cumsum(attention_mask_1d, dim=-1) - 1
@@ -128,6 +129,7 @@ class DreamAdapter(ModelAdapter):
         seq_len: int,
     ) -> torch.Tensor | str:
         """4D bool ``[B, 1, L, L]`` bidirectional, derived from 1D mask."""
+        del seq_len  # Dream derives the 4D shape from the 1D mask itself
         if attention_mask_1d is None:
             return "bidirectional"
         m = attention_mask_1d.bool()
@@ -154,18 +156,21 @@ class DreamAdapter(ModelAdapter):
         diffusion_cache: "DiffusionCache | None",
         use_cache: bool,
     ) -> AdapterOutput:
-        """Run one forward pass through Dream. Converts DiffusionCache <-> raw tuple."""
-        # Dream's modeling expects either tuple-of-tuples or None for past_key_values.
-        # We pass None and let Dream construct its own internal pkv; the
-        # DiffusionCache will be populated post-forward via a hook in Phase 2.
-        # For Phase 1, the engine recomputes K/V every step (BlockCache strategy)
-        # or skips committed positions (DKVCache strategy via reduced active_ids).
-        # Either way, the model itself doesn't need to read the DiffusionCache.
+        """Run one forward pass through Dream. Converts DiffusionCache <-> raw tuple.
+
+        Phase 1: ``diffusion_cache`` and ``use_cache`` are intentionally ignored
+        — caching is engine-side. The model itself runs with use_cache=False
+        and recomputes its own K/V every forward; the engine controls *which*
+        positions get fed in via active_ids slicing. Model-side cache reuse
+        (passing past_key_values into the model) layers in with the day-7
+        ops module.
+        """
+        del diffusion_cache, use_cache  # see docstring
         kwargs = dict(
             input_ids=input_ids,
             attention_mask=attention_mask if not isinstance(attention_mask, str) else None,
             position_ids=position_ids,
-            use_cache=False,   # Phase 1: cache is engine-side, not model-side
+            use_cache=False,
         )
         out = self.model(**kwargs)
         logits = out.logits if hasattr(out, "logits") else out[0]

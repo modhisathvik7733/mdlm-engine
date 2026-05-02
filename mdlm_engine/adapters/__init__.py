@@ -11,7 +11,7 @@ from mdlm_engine.adapters.base import (
 )
 
 # Side-effect imports register adapters via @register_adapter.
-for _mod in ("dream",):
+for _mod in ("dream", "llada"):
     importlib.import_module(f"mdlm_engine.adapters.{_mod}")
 del _mod
 
