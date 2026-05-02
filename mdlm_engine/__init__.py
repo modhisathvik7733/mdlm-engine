@@ -30,6 +30,7 @@ from mdlm_engine.adapters.base import (  # noqa: F401
     get_adapter_for,
 )
 from mdlm_engine.cache.base import DiffusionCache  # noqa: F401
+from mdlm_engine.core.engine import DiffusionEngine, GenerateOutput  # noqa: F401
 
 __all__ = [
     "__version__",
@@ -40,4 +41,6 @@ __all__ = [
     "register_adapter",
     "get_adapter_for",
     "DiffusionCache",
+    "DiffusionEngine",
+    "GenerateOutput",
 ]
