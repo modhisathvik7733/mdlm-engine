@@ -13,5 +13,12 @@ Why an internal ABC instead of subclassing `transformers.cache_utils.Cache`:
 """
 from mdlm_engine.cache.base import DiffusionCache, NoOpCache
 from mdlm_engine.cache.block import BlockCache
+from mdlm_engine.cache.dkv import CommittedSlotWriteError, DKVCache
 
-__all__ = ["DiffusionCache", "NoOpCache", "BlockCache"]
+__all__ = [
+    "DiffusionCache",
+    "NoOpCache",
+    "BlockCache",
+    "DKVCache",
+    "CommittedSlotWriteError",
+]
