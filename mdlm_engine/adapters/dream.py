@@ -281,7 +281,20 @@ class DreamAdapter(ModelAdapter):
             wiring = "C"
 
         if wiring == "A":
-            kwargs["past_key_values"] = diffusion_cache.to_legacy_kv()  # aliases
+            # fast_dllm expects past_key_values per-layer as 3D `[B, L, H*D]` —
+            # the K/V projections BEFORE the per-head view (modeling_dream.py:480-490).
+            # Our cache stores HF-standard 4D `[B, H, L, D]`. Convert at the
+            # boundary; aliasing through a permute is broken by reshape needing
+            # contiguous memory, so we explicitly copy back into the cache after
+            # the forward returns.
+            legacy_4d = diffusion_cache.to_legacy_kv()
+            pkv_3d: list[tuple[torch.Tensor, torch.Tensor]] = []
+            for K_4d, V_4d in legacy_4d:
+                B, H, L, D = K_4d.shape
+                K_3d = K_4d.permute(0, 2, 1, 3).contiguous().view(B, L, H * D)
+                V_3d = V_4d.permute(0, 2, 1, 3).contiguous().view(B, L, H * D)
+                pkv_3d.append((K_3d, V_3d))
+            kwargs["past_key_values"] = pkv_3d
             kwargs["use_cache"] = True
             kwargs["dual_cache"] = True
             # replace_position: True at positions the model should recompute
@@ -295,8 +308,25 @@ class DreamAdapter(ModelAdapter):
         out = self.model(**kwargs)
         logits = out.logits if hasattr(out, "logits") else out[0]
         logits = self.shift_logits(logits)
-        returned_pkv = getattr(out, "past_key_values", None) if wiring != "C" else None
-        return AdapterOutput(logits=logits, past_key_values=returned_pkv)
+
+        if wiring == "A":
+            # Write the model's updated 3D K/V back into the 4D cache. The
+            # cache's _K/_V are storage-shaped `[B, H, L, D]`; we materialize
+            # the inverse permute. This is one extra copy per layer per step
+            # (~12 MB on Dream-7B) — bandwidth-bound, ~ms scale on Blackwell.
+            updated_pkv = getattr(out, "past_key_values", None)
+            if updated_pkv is not None:
+                H = self.n_kv_heads
+                D = self.head_dim
+                for layer_idx, (K_3d, V_3d) in enumerate(updated_pkv):
+                    B, L, _ = K_3d.shape
+                    K_4d = K_3d.view(B, L, H, D).permute(0, 2, 1, 3).contiguous()
+                    V_4d = V_3d.view(B, L, H, D).permute(0, 2, 1, 3).contiguous()
+                    diffusion_cache._K[layer_idx].copy_(K_4d)
+                    diffusion_cache._V[layer_idx].copy_(V_4d)
+            return AdapterOutput(logits=logits, past_key_values=None)
+
+        return AdapterOutput(logits=logits, past_key_values=None)
 
     # ------------------------------------------------------------------
     # Cache layout
