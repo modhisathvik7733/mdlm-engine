@@ -194,10 +194,11 @@ echo
 
 # ---- 8. Speedup summary ----
 echo "[8/8] Speedup summary"
-python3 - <<'PY' 2>&1 | tee "$RESULTS_DIR/08_summary.log"
-import json
-with open("$RESULTS_DIR/03_dream_pathB.json") as f: b = json.load(f)
-with open("$RESULTS_DIR/04_dream_pathA.json") as f: a = json.load(f)
+RESULTS_DIR="$RESULTS_DIR" python3 - <<'PY' 2>&1 | tee "$RESULTS_DIR/08_summary.log"
+import json, os
+results_dir = os.environ["RESULTS_DIR"]
+with open(f"{results_dir}/03_dream_pathB.json") as f: b = json.load(f)
+with open(f"{results_dir}/04_dream_pathA.json") as f: a = json.load(f)
 print()
 print(f"{'metric':25s}  {'PATH B (baseline)':>20s}  {'PATH A (v0.2.1)':>20s}  {'delta':>10s}")
 print("-" * 80)
