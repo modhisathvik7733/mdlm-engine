@@ -9,7 +9,7 @@ Usage::
         model, adapter=DreamAdapter(model, tokenizer),
         cache="dkv", sampler="entropy", scheduler="slowfast",
     )
-    out = engine.generate(prompt_ids, max_new_tokens=256, ...)
+    out = engine.generate(prompt_ids, max_new_tokens=512, ...)
     print(tokenizer.decode(out.sequences[0]))
 
 The engine is *the* model-agnostic layer. It selects cache / sampler /
@@ -129,7 +129,7 @@ class DiffusionEngine:
         self,
         prompt_ids: torch.Tensor,
         *,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 512,
         block_length: int = 32,
         steps_per_block: int = 32,
         temperature: float = 0.0,
@@ -146,7 +146,9 @@ class DiffusionEngine:
             ``[B, L_p]`` long tensor on the model's device.
         max_new_tokens :
             How many tokens to generate beyond the prompt. Must be a
-            multiple of ``block_length``.
+            multiple of ``block_length``. Default 512 (v0.2.2 quality
+            preset). Use 256 for speed if completion length permits;
+            use 768 to match Dream-Coder's paper default.
         block_length :
             Tokens per diffusion block. Default 32 (matches Dream/DiffuCoder).
         steps_per_block :

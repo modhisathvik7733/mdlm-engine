@@ -77,7 +77,7 @@ python3 -m mdlm_engine.bench.harness \
     --sampler entropy \
     --benchmark humaneval_plus \
     --limit 20 \
-    --max_new_tokens 256 \
+    --max_new_tokens 512 \
     --block_length 32 \
     --steps_per_block 32 \
     --temperature 0.2 \
@@ -97,7 +97,7 @@ python3 -m mdlm_engine.bench.harness \
     --sampler entropy \
     --benchmark humaneval_plus \
     --limit 20 \
-    --max_new_tokens 256 \
+    --max_new_tokens 512 \
     --block_length 32 \
     --steps_per_block 32 \
     --temperature 0.2 \
@@ -184,7 +184,7 @@ python3 -m mdlm_engine.bench.harness \
     --sampler entropy \
     --benchmark humaneval_plus \
     --limit 20 \
-    --max_new_tokens 256 \
+    --max_new_tokens 512 \
     --block_length 32 \
     --steps_per_block 32 \
     --temperature 0.2 \

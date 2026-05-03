@@ -111,7 +111,10 @@ def main(argv: list[str] | None = None) -> int:
                     choices=["argmax", "maskgit_plus", "entropy", "margin", "topk_margin"])
     ap.add_argument("--benchmark", default="humaneval_plus", choices=["humaneval_plus"])
     ap.add_argument("--limit", type=int, default=20)
-    ap.add_argument("--max_new_tokens", type=int, default=256)
+    ap.add_argument("--max_new_tokens", type=int, default=512,
+                    help="Default 512 (v0.2.2): pass@1 0.6707 single-shot full HE+ on Dream-Coder. "
+                         "256 is faster (~9 s/problem) but caps ~30%% of HE+ problems mid-function "
+                         "(pass@1 drops to 0.54). 768 is the paper-default; ~3pp more for 1.5x cost.")
     ap.add_argument("--block_length", type=int, default=32)
     ap.add_argument("--steps_per_block", type=int, default=32)
     ap.add_argument("--temperature", type=float, default=0.2)
