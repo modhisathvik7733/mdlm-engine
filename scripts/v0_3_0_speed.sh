@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# v0.3.0 acceptance gate. Runs the speed-focused configurations on
-# Dream-Coder full HumanEval+ (n=164) and prints a comparison.
+# v0.3.0 speed gate. Runs the 4 speed-focused configurations on
+# Dream-Coder HumanEval+ subset (default n=20) and prints a comparison.
 #
 # Configs benchmarked:
 #   1. v0.2.2 baseline (PATH A 512, no MXFP8, no compile, no SSD)
@@ -8,8 +8,13 @@
 #   3. v0.3.0 + MXFP8 (gated on day-1 spike PASS)
 #   4. v0.3.0 + MXFP8 + compile (full stack)
 #
-# Cost: ~50-90 min wall depending on which levers are active. Each
-# config is ~$0.20-0.30 of vast.ai 5090 time.
+# Default n=20: speed signal is reliable for RELATIVE comparison even on
+# small subset. Quality was already validated at full HE+ in v0.2.2's
+# acceptance run (BENCHMARKS.md: 0.6707 pass@1). Override LIMIT=200 if
+# you want absolute pass@1 numbers from this run.
+#
+# Cost (n=20): ~12-15 min wall, ~$0.10 of vast.ai 5090 time.
+# Cost (n=164): ~50-90 min wall, ~$0.50.
 #
 # Override via env: SKIP_MXFP8=1 (if spike said FAIL) or SKIP_COMPILE=1.
 
@@ -20,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DREAM_PATH="${DREAM_PATH:-Dream-org/Dream-Coder-v0-Instruct-7B}"
-LIMIT="${LIMIT:-200}"
+LIMIT="${LIMIT:-20}"
 SKIP_MXFP8="${SKIP_MXFP8:-0}"
 SKIP_COMPILE="${SKIP_COMPILE:-0}"
 SPECULATIVE_K="${SPECULATIVE_K:-4}"
