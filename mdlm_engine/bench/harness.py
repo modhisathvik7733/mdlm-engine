@@ -70,6 +70,10 @@ class BenchResult:
     wall_seconds: float = 0.0
     n_diverse_configs: int = 1
     notes: list[str] = field(default_factory=list)
+    per_problem: list[dict] = field(default_factory=list)
+    # Per-problem records: {"task_id": str, "passed": bool, "seconds": float,
+    # "completion_len": int}. Lets v0.2.2-style ablations diff which problems
+    # regressed between two configs.
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +220,7 @@ def _run_benchmark(args, result: BenchResult) -> int:
     torch.cuda.reset_peak_memory_stats()
 
     for i, (task_id, row) in enumerate(items):
+        t_problem_start = time.time()
         prompt_ids = adapter.apply_chat_template(
             [{"role": "user", "content": _format_prompt(row['prompt'])}],
         ).to("cuda")
@@ -236,6 +241,12 @@ def _run_benchmark(args, result: BenchResult) -> int:
         passed = _check_completion(decoded, row)
         if passed:
             n_pass += 1
+        result.per_problem.append({
+            "task_id": task_id,
+            "passed": bool(passed),
+            "seconds": time.time() - t_problem_start,
+            "completion_len": int(out.sequences.shape[1] - prompt_ids.shape[1]),
+        })
 
         # Print the first 3 completions so we can debug "0% pass@1" at a glance.
         if i < 3:
