@@ -91,9 +91,18 @@ def _inspect_dream_caps(model: object) -> _DreamCaps:
     """Inspect ``model.forward`` and return a ``_DreamCaps`` record.
 
     Pure read — never calls the model. Safe to run on CPU before weights load.
+
+    For ``torch.compile``-wrapped models, ``model.forward`` is dynamo's wrapper
+    and doesn't expose the underlying model's kwargs. We detect compiled
+    wrappers via the canonical ``_orig_mod`` attribute (set by torch.compile
+    on OptimizedModule) and inspect the original's forward instead.
     """
+    # Unwrap torch.compile / OptimizedModule if present.
+    target = model
+    if hasattr(model, "_orig_mod"):
+        target = model._orig_mod  # type: ignore[attr-defined]
     try:
-        sig = inspect.signature(model.forward)  # type: ignore[attr-defined]
+        sig = inspect.signature(target.forward)  # type: ignore[attr-defined]
         params = sig.parameters
     except (AttributeError, ValueError, TypeError):
         # Some compiled / quantized models don't expose a clean signature.
