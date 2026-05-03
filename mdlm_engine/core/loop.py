@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import torch
+
 if TYPE_CHECKING:
     from mdlm_engine.adapters.base import ModelAdapter
     from mdlm_engine.cache.base import DiffusionCache
@@ -168,5 +170,40 @@ def generate_block(
                 # incorrect for multi-sample). For multi-sample we extend
                 # via 2D in Phase 2.
                 cache.commit(samp_pos)
+
+        # Force-commit block_start at step 0 if it's still masked. This
+        # matches fast_dllm's protocol (`generation_utils_block.py:511`):
+        # they sample at block_start FROM the init forward and commit it
+        # before the iter loop begins. Reason: iter forwards (block-only
+        # input) cannot produce a correct prediction for block_start
+        # because Dream's `shift_logits` (right-shift by 1) on a block-
+        # only output makes shifted[0] predict block_start+1, not
+        # block_start. Sampling at block_start in iter mode would use a
+        # misaligned logit → garbage outputs (caught by v0.2.1 day-3 gate
+        # where pass@1 dropped to 0 with `pythonpython` token corruption).
+        # By committing block_start at step 0 with the init forward's
+        # correctly-aligned logit, iter steps never face the misalignment.
+        # This is a no-op for PATH C but required for PATH A.
+        if step == 0:
+            row_mask_at_block_start = (
+                state.x[:, block_start] == adapter.mask_token_id
+            )
+            if bool(row_mask_at_block_start.any()):
+                # Sample at block_start from the init forward's logits.
+                logit_at_block_start = full_logits[:, block_start, :]  # [B, V]
+                _, candidate_at_block_start = sampler(
+                    logit_at_block_start,
+                    temperature=cfg.temperature,
+                    top_p=cfg.top_p,
+                    top_k=cfg.top_k,
+                )
+                # Only write at samples whose block_start is still masked.
+                rows_to_write = row_mask_at_block_start.nonzero(as_tuple=True)[0]
+                for b in rows_to_write.tolist():
+                    state.x[b, block_start] = int(candidate_at_block_start[b])
+                forced_pos = torch.tensor(
+                    [block_start], dtype=torch.long, device=state.x.device,
+                )
+                cache.commit(forced_pos)
 
     return forwards
