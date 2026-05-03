@@ -199,34 +199,43 @@ class DiffusionEngine:
         trace: list = []
         eos_set = set(self.adapter.eos_token_ids)
 
+        # `inference_mode` disables autograd globally for everything inside.
+        # Without it, PATH A's chain of cached forwards builds a graph that
+        # holds references to every intermediate activation across all 32 ×
+        # n_blocks steps — exhausts the 5090's 32 GB at iter step 1 of problem 0.
+        # `model.eval()` alone does NOT disable autograd; it only flips dropout/
+        # batchnorm. inference_mode is preferred over no_grad: it's strictly
+        # stronger (zero version-counter overhead) and we never need autograd
+        # during generation.
         n_blocks = max_new_tokens // block_length
-        for block_idx in range(n_blocks):
-            forwards = generate_block(
-                state=state, adapter=self.adapter, cache=cache,
-                sampler=self.sampler_fn, scheduler=self.scheduler_fn, cfg=cfg,
-            )
-            total_forwards += forwards
-            if return_trace:
-                trace.append({
-                    "block": block_idx,
-                    "forwards": forwards,
-                    "x_snapshot": state.x.clone().cpu(),
-                })
+        with torch.inference_mode():
+            for block_idx in range(n_blocks):
+                forwards = generate_block(
+                    state=state, adapter=self.adapter, cache=cache,
+                    sampler=self.sampler_fn, scheduler=self.scheduler_fn, cfg=cfg,
+                )
+                total_forwards += forwards
+                if return_trace:
+                    trace.append({
+                        "block": block_idx,
+                        "forwards": forwards,
+                        "x_snapshot": state.x.clone().cpu(),
+                    })
 
-            # No attn_mask update needed: it's already all-1s by construction
-            # (masked-diffusion convention; mask tokens are valid attendees).
+                # No attn_mask update needed: it's already all-1s by construction
+                # (masked-diffusion convention; mask tokens are valid attendees).
 
-            # Check EOS in the just-finalized block.
-            block_slice = state.x[:, state.block_start:state.block_end]
-            for tok_id in eos_set:
-                state.eos_seen |= (block_slice == tok_id).any(dim=-1)
-            if bool(state.eos_seen.all()):
-                break
+                # Check EOS in the just-finalized block.
+                block_slice = state.x[:, state.block_start:state.block_end]
+                for tok_id in eos_set:
+                    state.eos_seen |= (block_slice == tok_id).any(dim=-1)
+                if bool(state.eos_seen.all()):
+                    break
 
-            state.block_start = state.block_end
-            state.block_end = min(state.block_end + block_length, L_max)
-            if state.block_end <= state.block_start:
-                break
+                state.block_start = state.block_end
+                state.block_end = min(state.block_end + block_length, L_max)
+                if state.block_end <= state.block_start:
+                    break
 
         return GenerateOutput(
             sequences=state.x[:, :state.block_end].clone(),
