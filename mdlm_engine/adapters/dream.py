@@ -247,85 +247,144 @@ class DreamAdapter(ModelAdapter):
         position_ids: torch.Tensor | None,
         diffusion_cache: "DiffusionCache | None",
         use_cache: bool,
+        *,
+        block_start: int | None = None,
+        block_end: int | None = None,
+        is_init: bool = False,
     ) -> AdapterOutput:
         """Run one forward pass through Dream.
 
         Cache-wiring path is chosen at construction time via ``self._caps``:
 
-        - **PATH A** (full fast_dllm support): pass ``past_key_values``,
-          ``dual_cache=True``, ``replace_position`` derived from
-          ``~commit_state``. Model writes new K/V in-place at masked positions
-          via fast_dllm's ``past_key[:, replace_indices] = key_states`` pattern
-          (`modeling_dream.py:484-490`). The cache picks up the writes
-          automatically because ``to_legacy_kv()`` returns aliases of the
-          internal ``_K``/``_V`` tensors.
-        - **PATH B** (standard HF caching only): pass ``past_key_values`` +
-          ``use_cache=True`` but skip the fast_dllm extensions. Speedup smaller.
-        - **PATH C** (no caching support): match v0.1.0 behavior. Pass
-          ``use_cache=False``, same forward as before.
-        """
-        # Build base kwargs common to all paths.
-        kwargs: dict = dict(
-            input_ids=input_ids,
-            attention_mask=attention_mask if not isinstance(attention_mask, str) else None,
-            position_ids=position_ids,
-        )
+        - **PATH A** (full fast_dllm support): two-mode dispatch matching
+          fast_dllm's reference flow (`generation_utils_block.py:495-571`):
 
+          - ``is_init=True``: full-sequence forward, ``past_key_values=None``,
+            ``use_cache=True``. Model returns past_key_values for the whole
+            sequence; we write them back into our cache. No ``dual_cache`` —
+            that's an iter-only extension.
+          - ``is_init=False``: block-only forward —
+            ``input_ids = state.x[:, block_start:block_end]``,
+            ``past_key_values = cache``, ``dual_cache=True``,
+            ``replace_position = bool[B, L_full]`` with True only at
+            ``[block_start:block_end]``. The model recomputes K/V at the
+            active block and writes them in-place into past_key. Other
+            positions' cached K/V is reused.
+
+          fast_dllm's modeling expects past_key_values as 3D
+          ``[B, L, H*D]`` (pre-per-head view, line 480-490). Our cache
+          stores HF-standard 4D ``[B, H, L, D]``. We convert at the
+          boundary; aliasing through permute+reshape is broken because
+          reshape needs contiguous memory after a permute, so we copy
+          explicitly. Cost: ~12 MB per layer per step on Dream-7B,
+          bandwidth-bound, sub-ms on Blackwell.
+
+        - **PATH B** (collapsed to C — see `_DreamCaps` docstring).
+        - **PATH C** (no caching support): full forward, ``use_cache=False``.
+          Block-only hints are ignored.
+        """
         # Decide path: caps + caller's `use_cache` request both must permit caching.
-        # PATH B is detected accurately but collapsed to PATH C here — see
-        # `_DreamCaps` docstring for why stock HF caching can't accelerate
-        # masked diffusion (append-only torch.cat vs needed in-place replace).
+        # PATH B is detected accurately but collapsed to PATH C here.
         if use_cache and diffusion_cache is not None and self._caps.path == "A":
             wiring = "A"
         else:
             wiring = "C"
 
+        # Build base kwargs common to all paths.
+        kwargs: dict = dict(
+            attention_mask=attention_mask if not isinstance(attention_mask, str) else None,
+            position_ids=position_ids,
+        )
+
         if wiring == "A":
-            # fast_dllm expects past_key_values per-layer as 3D `[B, L, H*D]` —
-            # the K/V projections BEFORE the per-head view (modeling_dream.py:480-490).
-            # Our cache stores HF-standard 4D `[B, H, L, D]`. Convert at the
-            # boundary; aliasing through a permute is broken by reshape needing
-            # contiguous memory, so we explicitly copy back into the cache after
-            # the forward returns.
+            if is_init:
+                # ---- Init pass: full sequence, populate cache fresh ----
+                kwargs["input_ids"] = input_ids
+                kwargs["use_cache"] = True
+                # No past_key_values, no dual_cache — model fresh-computes K/V
+                # for the whole sequence and returns them.
+                out = self.model(**kwargs)
+                logits = out.logits if hasattr(out, "logits") else out[0]
+                logits = self.shift_logits(logits)
+
+                # Write returned (3D, full-sequence) past_key_values into cache (4D).
+                pkv = getattr(out, "past_key_values", None)
+                if pkv is not None:
+                    H, D = self.n_kv_heads, self.head_dim
+                    for layer_idx, (K_3d, V_3d) in enumerate(pkv):
+                        B, L, _ = K_3d.shape
+                        K_4d = K_3d.view(B, L, H, D).permute(0, 2, 1, 3).contiguous()
+                        V_4d = V_3d.view(B, L, H, D).permute(0, 2, 1, 3).contiguous()
+                        diffusion_cache._K[layer_idx].copy_(K_4d)
+                        diffusion_cache._V[layer_idx].copy_(V_4d)
+                return AdapterOutput(logits=logits, past_key_values=None)
+
+            # ---- Iter pass: block-only input, cached K/V via dual_cache ----
+            assert block_start is not None and block_end is not None, (
+                "PATH A iter forward needs block_start, block_end"
+            )
+            B, L_full = input_ids.shape
+            block_input = input_ids[:, block_start:block_end]
+
+            # Build replace_position: True only on the active block.
+            replace_position = torch.zeros(
+                B, L_full, dtype=torch.bool, device=input_ids.device,
+            )
+            replace_position[:, block_start:block_end] = True
+
+            # Hand cache to model as 3D pkv.
             legacy_4d = diffusion_cache.to_legacy_kv()
             pkv_3d: list[tuple[torch.Tensor, torch.Tensor]] = []
             for K_4d, V_4d in legacy_4d:
-                B, H, L, D = K_4d.shape
+                _, H, L, D = K_4d.shape
                 K_3d = K_4d.permute(0, 2, 1, 3).contiguous().view(B, L, H * D)
                 V_3d = V_4d.permute(0, 2, 1, 3).contiguous().view(B, L, H * D)
                 pkv_3d.append((K_3d, V_3d))
+
+            kwargs["input_ids"] = block_input
+            # Drop the 4D attention_mask — its [B,1,L,L] shape doesn't match
+            # the block-input Q size [B,1,block_len,L]. fast_dllm's modeling
+            # treats `attention_mask=None` as full bidirectional, which is
+            # what we want.
+            kwargs["attention_mask"] = None
+            # Slice position_ids to the active block to match input_ids shape.
+            if position_ids is not None:
+                kwargs["position_ids"] = position_ids[:, block_start:block_end]
             kwargs["past_key_values"] = pkv_3d
             kwargs["use_cache"] = True
             kwargs["dual_cache"] = True
-            # replace_position: True at positions the model should recompute
-            # K/V for (= NOT yet committed). commit_state() is True at
-            # frozen/committed positions; invert.
-            kwargs["replace_position"] = ~diffusion_cache.commit_state()
-        else:
-            # PATH C (or PATH B collapsed to C): v0.1.0 behavior. No caching.
-            kwargs["use_cache"] = False
+            kwargs["replace_position"] = replace_position
 
-        out = self.model(**kwargs)
-        logits = out.logits if hasattr(out, "logits") else out[0]
-        logits = self.shift_logits(logits)
+            out = self.model(**kwargs)
+            block_logits = out.logits if hasattr(out, "logits") else out[0]
+            block_logits = self.shift_logits(block_logits)  # right-shift inside block
 
-        if wiring == "A":
-            # Write the model's updated 3D K/V back into the 4D cache. The
-            # cache's _K/_V are storage-shaped `[B, H, L, D]`; we materialize
-            # the inverse permute. This is one extra copy per layer per step
-            # (~12 MB on Dream-7B) — bandwidth-bound, ~ms scale on Blackwell.
+            # Pad to full-sequence shape so the engine's slicing keeps working.
+            full_logits = torch.zeros(
+                B, L_full, block_logits.shape[-1],
+                dtype=block_logits.dtype, device=block_logits.device,
+            )
+            full_logits[:, block_start:block_end, :] = block_logits
+
+            # Copy updated 3D K/V back into the 4D cache.
             updated_pkv = getattr(out, "past_key_values", None)
             if updated_pkv is not None:
-                H = self.n_kv_heads
-                D = self.head_dim
+                H, D = self.n_kv_heads, self.head_dim
                 for layer_idx, (K_3d, V_3d) in enumerate(updated_pkv):
-                    B, L, _ = K_3d.shape
+                    _, L, _ = K_3d.shape
                     K_4d = K_3d.view(B, L, H, D).permute(0, 2, 1, 3).contiguous()
                     V_4d = V_3d.view(B, L, H, D).permute(0, 2, 1, 3).contiguous()
                     diffusion_cache._K[layer_idx].copy_(K_4d)
                     diffusion_cache._V[layer_idx].copy_(V_4d)
-            return AdapterOutput(logits=logits, past_key_values=None)
+            return AdapterOutput(logits=full_logits, past_key_values=None)
 
+        # ---- PATH C: v0.1.0 behavior. No caching, ignore block hints. ----
+        del block_start, block_end, is_init
+        kwargs["input_ids"] = input_ids
+        kwargs["use_cache"] = False
+        out = self.model(**kwargs)
+        logits = out.logits if hasattr(out, "logits") else out[0]
+        logits = self.shift_logits(logits)
         return AdapterOutput(logits=logits, past_key_values=None)
 
     # ------------------------------------------------------------------

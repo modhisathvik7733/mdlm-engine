@@ -280,6 +280,10 @@ class ModelAdapter(ABC):
         position_ids: "torch.Tensor | None",
         diffusion_cache: "DiffusionCache | None",
         use_cache: bool,
+        *,
+        block_start: int | None = None,
+        block_end: int | None = None,
+        is_init: bool = False,
     ) -> AdapterOutput:
         """One forward pass through the model.
 
@@ -290,6 +294,13 @@ class ModelAdapter(ABC):
             3. Calling `self.shift_logits(out.logits)` before returning.
             4. Returning logits + the model's `past_key_values` for the cache
                module to consume.
+
+        Args ``block_start`` / ``block_end`` / ``is_init`` are advisory hints
+        used by adapters that implement fast_dllm-style block-only iter
+        forwards (DreamAdapter PATH A). Adapters that pass full sequence
+        every step (LLaDA, DreamAdapter PATH C) ignore them. Returned logits
+        always have shape ``[B, L_full, V]`` regardless — adapters that
+        compute on a slice pad the rest with zeros.
 
         The engine never sees the model directly.
         """

@@ -157,6 +157,10 @@ class LLaDAAdapter(ModelAdapter):
         position_ids: torch.Tensor | None,
         diffusion_cache: "DiffusionCache | None",
         use_cache: bool,
+        *,
+        block_start: int | None = None,
+        block_end: int | None = None,
+        is_init: bool = False,
     ) -> AdapterOutput:
         """One forward through LLaDA. We do NOT pass position_ids
         (LLaDA's forward doesn't accept it), and we pass attention_bias=None
@@ -175,7 +179,9 @@ class LLaDAAdapter(ModelAdapter):
         patching LLaDA's modeling code with fast_dllm-style extensions or
         building a per-step write-back path through ``update_from_model_output``.
         """
-        del position_ids, diffusion_cache, use_cache  # see docstring
+        # LLaDA always passes full sequence (PATH C); the block-only hints are
+        # only consumed by adapters that implement fast_dllm-style iter forwards.
+        del position_ids, diffusion_cache, use_cache, block_start, block_end, is_init
         kwargs = dict(
             input_ids=input_ids,
             attention_mask=attention_mask if not isinstance(attention_mask, str) else None,

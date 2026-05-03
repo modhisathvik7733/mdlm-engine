@@ -99,6 +99,9 @@ def generate_block(
             position_ids=position_ids,
             diffusion_cache=cache,
             use_cache=True,
+            block_start=block_start,
+            block_end=block_end,
+            is_init=(step == 0),
         )
         forwards += 1
 
