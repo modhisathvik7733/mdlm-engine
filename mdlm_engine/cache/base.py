@@ -133,6 +133,32 @@ class DiffusionCache(ABC):
         K, V = past_key_values_layer
         self.replace_at(layer, positions, K, V)
 
+    def to_legacy_kv(self) -> "list[tuple[torch.Tensor, torch.Tensor]]":
+        """Materialize the cache as HF's legacy ``past_key_values`` shape:
+        a list of ``(K, V)`` per layer, each ``[B, n_kv_heads, L_max, head_dim]``.
+
+        This is what every Dream/Llama/Qwen-family modeling forward expects when
+        you pass ``past_key_values=...``. Phase 2 wires this into
+        ``adapter.forward()`` so the model can reuse K/V across diffusion steps.
+
+        Default impl assumes the cache stores `_K[layer]` / `_V[layer]` lists
+        of tensors — the layout used by ``BlockCache`` and ``DKVCache``.
+        Subclasses with a different storage layout (e.g. a future ``SparseCache``)
+        should override.
+
+        Raises ``NotImplementedError`` if the subclass doesn't expose ``_K``/``_V``.
+        ``NoOpCache`` (the equivalence baseline) returns ``None`` for each layer
+        — telling the model "no cache, recompute everything" — so it overrides.
+        """
+        K_list = getattr(self, "_K", None)
+        V_list = getattr(self, "_V", None)
+        if K_list is None or V_list is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} doesn't expose _K/_V for "
+                f"to_legacy_kv. Override the method on the subclass."
+            )
+        return [(K_list[i], V_list[i]) for i in range(self.n_layers)]
+
     def attention_mask_for_step(
         self,
         active_positions: "torch.Tensor",
@@ -144,6 +170,7 @@ class DiffusionCache(ABC):
         recomputing. Subclasses can return a 4D bool mask if they want to
         restrict attention to committed + active.
         """
+        del active_positions  # default ignores; subclasses can use
         return "bidirectional"
 
     @property
@@ -166,9 +193,11 @@ class NoOpCache(DiffusionCache):
     """
 
     def replace_at(self, layer, positions, K, V):  # noqa: D401
+        del layer, positions, K, V  # NoOp stores nothing
         return None
 
     def read_full(self, layer):
+        del layer  # all layers return the same empty tensor
         import torch
 
         empty = torch.empty(
@@ -178,7 +207,12 @@ class NoOpCache(DiffusionCache):
         return empty, empty
 
     def commit(self, positions):
+        del positions  # NoOp tracks no commits
         return None
+
+    def to_legacy_kv(self):
+        """NoOpCache returns ``None`` per layer — signals "recompute everything"."""
+        return [None] * self.n_layers
 
     def commit_state(self):
         import torch
