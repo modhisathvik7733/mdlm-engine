@@ -158,6 +158,41 @@ class DKVCache(DiffusionCache):
         self._commit_state.zero_()
         self._pending_commits.zero_()
 
+    def update_from_model_output(
+        self,
+        layer: int,
+        past_key_values_layer: tuple[torch.Tensor, torch.Tensor],
+        positions: torch.Tensor,
+    ) -> None:
+        """Write the model's returned K/V back into the cache, bypassing
+        the strict committed-slot check.
+
+        Why we override the default:
+        - ``replace_at`` runs ``_check_no_committed_overlap`` to catch
+          ENGINE bugs (scheduler re-asks for recompute at a committed slot).
+        - But the model's own returned K/V is authoritative — by the time
+          ``model.forward`` returns, the values it produced are the new
+          truth even at positions that *happen* to overlap commit_state.
+        - Phase 2 will primarily use the alias-based in-place write path
+          (``to_legacy_kv`` returns aliases of ``_K``/``_V``; the model's
+          ``dual_cache=True`` writes directly through). This method is the
+          fallback for models that return a non-aliased ``past_key_values``.
+
+        Same shape contract as ``replace_at``:
+          - ``positions``: ``[n_pos]`` (broadcast) or ``[B, n_pos]``
+          - K, V: ``[B, n_kv_heads, n_pos, head_dim]``
+        """
+        self._validate_positions(positions, past_key_values_layer[0])
+        K, V = past_key_values_layer
+        if positions.ndim == 1:
+            self._K[layer].index_copy_(2, positions, K)
+            self._V[layer].index_copy_(2, positions, V)
+        else:
+            B = positions.shape[0]
+            for b in range(B):
+                self._K[layer][b, :, positions[b], :] = K[b]
+                self._V[layer][b, :, positions[b], :] = V[b]
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
