@@ -136,8 +136,8 @@ class DiffusionEngine:
         top_p: float | None = 0.95,
         top_k: int | None = None,
         confidence_threshold: float = 0.9,
-        speculative_k: int = 0,
-        speculative_threshold: float = 0.95,
+        speculative_k: int = 1,
+        speculative_threshold: float = 0.99,
         return_trace: bool = False,
     ) -> GenerateOutput:
         """Run masked-diffusion generation.

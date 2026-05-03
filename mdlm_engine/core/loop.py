@@ -65,7 +65,7 @@ class LoopConfig:
     # (temp=0.2, top_p=0.95) this is the threshold above which top-p
     # sampling has no other candidates, so SSD's argmax commit matches
     # what the sampler would have done. Lossless within sampling noise.
-    speculative_threshold: float = 0.95
+    speculative_threshold: float = 0.99
     confidence_threshold: float = 0.9
 
 

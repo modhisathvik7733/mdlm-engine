@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdlm-engine"
-version = "0.2.2"
+version = "0.3.0"
 description = "A model-agnostic Python inference engine for masked diffusion language models."
 readme = "README.md"
 requires-python = ">=3.10"
