@@ -40,7 +40,7 @@ run_config() {
             --max_new_tokens 512 --block_length 32 --steps_per_block 32 \
             --temperature 0.0 --top_p 0.95 \
             --out "$RESULTS_DIR/$label.json" 2>&1 | \
-            tee "$RESULTS_DIR/$label.log" | tail -10
+            tee "$RESULTS_DIR/$label.log"
     else
         python3 -m mdlm_engine.bench.harness \
             --adapter dream --model_path "$DREAM_PATH" \
@@ -51,7 +51,7 @@ run_config() {
             --temperature 0.0 --top_p 0.95 \
             --speculative_k "$k" --speculative_threshold "$threshold" \
             --out "$RESULTS_DIR/$label.json" 2>&1 | \
-            tee "$RESULTS_DIR/$label.log" | tail -10
+            tee "$RESULTS_DIR/$label.log"
     fi
     echo
 }
