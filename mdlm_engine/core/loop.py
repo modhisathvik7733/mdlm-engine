@@ -57,19 +57,15 @@ class LoopConfig:
     # Lossless at temperature == 0 IF confidence threshold is high enough
     # to avoid commit-order drift; see speculative_threshold.
     speculative_k: int = 0
-    # v0.3.0 SSD confidence gate. Day-1 v0.3.0 gate run found that
-    # threshold=0 drops pass@1 by 25 pp due to commit-order drift in
-    # masked diffusion (different commit order → different cascading
-    # context, even at temp=0). threshold=0.95 default only proposes
-    # positions where the model's top-1 probability ≥ 95% — order-of-
-    # commit shouldn't matter at that confidence level.
+    # v0.3.0 SSD confidence gate. Day-1 v0.3.0 gate run found threshold=0
+    # drops pass@1 by 25 pp due to commit-order drift in masked diffusion
+    # (different commit order → different cascading context, even at
+    # temp=0). threshold=0.95 default only proposes positions where the
+    # model's top-1 probability ≥ 95% — at production sampling settings
+    # (temp=0.2, top_p=0.95) this is the threshold above which top-p
+    # sampling has no other candidates, so SSD's argmax commit matches
+    # what the sampler would have done. Lossless within sampling noise.
     speculative_threshold: float = 0.95
-    # v0.3.0 SSD Redesign A: when True (default with speculative_k>0),
-    # SSD runs at step 0 ON THE INIT FORWARD's logits, BEFORE the regular
-    # sampler — gets first pick of high-confidence positions. When False,
-    # falls back to the day-1 per-step SSD (1.12x speedup) for users who
-    # specifically want that behavior.
-    speculative_block_init: bool = True
     confidence_threshold: float = 0.9
 
 
@@ -131,21 +127,30 @@ def generate_block(
         full_logits = out.logits  # [B, L, V]; adapter already applied shift_logits
         block_logits = full_logits[:, block_start:block_end, :]   # [B, block_len, V]
 
-        # v0.3.0 block-level SSD (Redesign A). At step 0, after the init
-        # forward, propose ALL active-block positions whose top-1 softmax
-        # probability ≥ threshold and verify with one extra forward. The
-        # accepted positions get committed BEFORE the regular sampler runs,
-        # so slowfast/scheduler operates on the remaining residual.
+        # v0.3.0 self-speculative decoding (arxiv 2510.04147), Redesign C.
+        # At every step (not just step 0), AFTER the regular forward but
+        # BEFORE the regular sampler, propose all currently-masked active-
+        # block positions whose top-1 softmax probability ≥ threshold and
+        # verify with one extra forward.
         #
-        # Net cost: +1 verify forward at step 0. Net benefit: many positions
-        # committed in 2 forwards instead of 2K regular forwards. Lossless
-        # at high threshold (0.95+) — we only commit positions where the
-        # model would predict the same token regardless of when it commits.
-        if (
-            step == 0
-            and cfg.speculative_k > 0
-            and cfg.speculative_block_init
-        ):
+        # Why "every step + full mask + before sampler" beats earlier designs:
+        #   - Block-init at step 0 (Redesign A) failed: at step 0 ALL block
+        #     positions are masked → low confidence everywhere → empty
+        #     proposal → verify forward overhead with no commits.
+        #   - Per-step on residual after sampler (day-1) only saw 1.12x
+        #     because slowfast had already grabbed the high-confidence
+        #     positions; SSD got "leftovers".
+        #   - This design (every step, full mask, before sampler) lets SSD
+        #     pick first as confidence accumulates step-by-step. At late
+        #     steps when many positions are already committed and remaining
+        #     ones become high-confidence, SSD fires and commits many in
+        #     one verify forward.
+        #
+        # Lossless at high threshold (0.95) at production sampling settings
+        # (temp=0.2, top_p=0.95): when the model's top-1 prob ≥ 95%, top-p
+        # sampling has no other candidates → SSD's argmax-vs-argmax verify
+        # picks exactly what the regular sampler would have committed.
+        if cfg.speculative_k > 0:
             from mdlm_engine.speculative import (
                 propose_block_level, verify as _spec_verify,
             )
@@ -176,10 +181,9 @@ def generate_block(
                     active_ids = state.x[:, block_start:block_end]
                     mask_index = active_ids == adapter.mask_token_id
                     if not bool(mask_index.any()):
-                        # Block fully committed by block-level SSD — skip
-                        # the rest of step 0's sampler/scheduler/commit and
-                        # break the outer loop on the next iteration via the
-                        # mask_index.any() guard.
+                        # Block fully committed by SSD — skip rest of step
+                        # and the outer loop's mask_index.any() guard will
+                        # exit on the next iteration.
                         continue
         flat_mask = mask_index.flatten()
         flat_logits = block_logits.reshape(-1, block_logits.shape[-1])[flat_mask]
@@ -275,41 +279,5 @@ def generate_block(
                     [block_start], dtype=torch.long, device=state.x.device,
                 )
                 cache.commit(forced_pos)
-
-        # v0.3.0 per-step SSD (Redesign B fallback). Runs only when
-        # speculative_k > 0 AND speculative_block_init is False. This was
-        # the day-1 implementation; benchmark on Dream-Coder showed only
-        # 1.12x speedup because SSD operated on the residual after the
-        # regular sampler. Redesign A (block_init=True, default) replaces
-        # this with block-level SSD before the sampler at step 0.
-        if cfg.speculative_k > 0 and not cfg.speculative_block_init:
-            from mdlm_engine.speculative import propose, verify as _spec_verify
-
-            post_mask_index = (
-                state.x[:, block_start:block_end] == adapter.mask_token_id
-            )
-            if bool(post_mask_index.any()):
-                proposal = propose(
-                    block_logits=block_logits,
-                    mask_index=post_mask_index,
-                    block_start=block_start,
-                    k=cfg.speculative_k,
-                    temperature=cfg.temperature,
-                    confidence_threshold=cfg.speculative_threshold,
-                )
-                if len(proposal) > 0:
-                    spec_result = _spec_verify(
-                        state=state,
-                        cache=cache,
-                        adapter=adapter,
-                        proposal=proposal,
-                        block_start=block_start,
-                        block_end=block_end,
-                        attn_mask_full=attn_mask,
-                        position_ids_full=position_ids,
-                    )
-                    forwards += 1  # the verification forward
-                    if spec_result.n_accepted > 0:
-                        cache.commit(spec_result.accepted_positions)
 
     return forwards
