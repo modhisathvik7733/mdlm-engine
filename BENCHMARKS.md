@@ -13,18 +13,25 @@ Canonical results log for every tagged release. Each row is a real measurement o
 | v0.2.1 | 2026-05-03 | **164** | 256 | 9.14 | 25.3 | **0.5427 (89/164)** | A (full HE+) |
 | **v0.2.2** | **2026-05-03** | **164** | **512** | **11.60** | **25.1** | **0.6707 (110/164)** | **A (default)** |
 | v0.3.0 candidate (no SSD) | 2026-05-04 | 20 | 512 | 9.82 | 25.4 | 0.800 (16/20) | A |
-| **v0.3.0 candidate (SSD t=0.95)** | **2026-05-04** | **20** | **512** | **4.19** | **52.7** | **0.800 (16/20)** | **A + SSD Redesign C** |
+| v0.3.0 candidate (SSD t=0.95) | 2026-05-04 | 20 | 512 | 4.19 | 52.7 | 0.800 (16/20) | A + SSD Redesign C |
 | v0.3.0 (SSD t=0.90, drift) | 2026-05-04 | 20 | 512 | 3.93 | 57.8 | 0.600 (12/20) | A + SSD (too aggressive) |
+| **v0.3.0 (SSD t=0.95) full HE+** | **2026-05-04** | **164** | **512** | **5.74** | **51.2** | **0.6220 (102/164)** | **A + SSD Redesign C** |
 
 The n=20 numbers (0.900-0.950) inflated because the first 20 HE+ problems are easy and fit in max_new=256. **The honest baseline is 0.6707 on full HE+ at v0.2.2's defaults.** Slightly above DiffuCoder-7B-cpGRPO's 0.652 published number.
 
-**v0.3.0 candidate vs v0.2.2 baseline (n=20, both at PATH A 512, temp=0.2, entropy, top_p=0.95):**
-- pass@1 unchanged (0.80 vs 0.80 — same problems passed; per-problem agreement 80%, with 2 flips each direction = noise)
-- s/problem: 9.82 → **4.19** = **2.34× faster**
-- forwards: 4938 → 2012 = **53% reduction**
-- VRAM unchanged at 16.06 GB
+**v0.3.0 SSD t=0.95 vs v0.2.2 baseline (n=164, both at PATH A 512, temp=0.2, entropy, top_p=0.95):**
+- pass@1: 0.6707 → **0.6220** = **-4.87 pp** (real but small quality cost)
+- s/problem: 11.60 → **5.74** = **2.02× faster**
+- forwards: 38170 → **22791** = **-40%**
+- VRAM: 16.17 GB → 16.29 GB (unchanged)
 
-Full HE+ (n=164) validation **pending** — expected pass@1 within 2pp of v0.2.2's 0.6707, s/problem ~5.
+The n=20 "0.80 = 0.80" identity at this config was sample-size noise — full HE+ shows there IS a real ~5 pp pass@1 cost from SSD's argmax-vs-argmax verify diverging slightly from the regular sampler's stochastic outputs at temp=0.2. Trade-off is real but modest: ~2× speedup costs ~5 pp pass@1.
+
+**Comparison with published baselines on full HE+ single-shot:**
+- mdlm-engine v0.2.2 (no SSD): 0.6707 — slightly above DiffuCoder
+- **mdlm-engine v0.3.0 (SSD t=0.95): 0.6220** — slightly below DiffuCoder (0.652) at 2× the speed
+- DiffuCoder-7B-cpGRPO (paper, no engine info): 0.652
+- LLaDA-8B-Instruct (paper): 0.494
 
 ## Path / cache-wiring summary
 
@@ -65,19 +72,24 @@ Three earlier SSD designs failed by fighting this property:
 
 Redesign C runs SSD BEFORE the sampler at every step on the FULL current mask. Adapts to problem difficulty: boilerplate-heavy problems (many high-conf positions) → big speedup; logic-heavy problems (few high-conf positions) → SSD fires rarely, near-baseline speed but quality preserved.
 
-### v0.3.0 candidate breakdown (n=20, 2026-05-04)
+### v0.3.0 candidate breakdown — full HE+ (n=164, 2026-05-04)
 
-| metric | baseline (no SSD) | SSD t=0.95 |
-|---|---:|---:|
-| Settings | PATH A 512, temp=0.2, entropy, top_p=0.95 | + speculative_k=1, threshold=0.95 |
-| pass@1 | 0.800 (16/20) | **0.800 (16/20) — identical** |
-| s/problem | 9.82 | **4.19** |
-| tokens/sec | 25.4 | **52.7** |
-| total forwards | 4938 | **2012** |
-| Speedup vs v0.2.2 baseline | 1.00× | **2.34×** |
-| Per-problem agreement | — | 80% (4 problems flipped, net 0 = sampling noise) |
+| metric | v0.2.2 baseline (recorded) | v0.3.0 SSD t=0.95 (measured) | Δ |
+|---|---:|---:|---:|
+| Settings | PATH A 512, temp=0.2, entropy, top_p=0.95 | + speculative_k=1, threshold=0.95 | (SSD added) |
+| pass@1 | **0.6707** (110/164) | **0.6220** (102/164) | **-4.87 pp** |
+| s/problem | 11.60 | **5.74** | **2.02× faster** |
+| tokens/sec | 25.1 | **51.2** | **+104%** |
+| total forwards | 38170 | 22791 | **-40%** |
+| peak VRAM (GB) | 16.17 | 16.29 | unchanged |
 
-n=20 is noisy (single-problem flip = 5pp); full HE+ validation pending to lock numbers.
+The 2× speedup is mechanical (forward count drops 40%, wall-clock follows). The 4.87 pp pass@1 cost is the price of approximating temp=0.2 sampling with argmax at high-confidence positions — at n=164 the imperfect approximation accumulates to ~8 problem-level disagreements (102 pass vs 110 pass).
+
+This is a real **speed/quality trade-off offering**, not a strict improvement:
+- v0.2.2 default: quality preset (0.6707 / 11.60s)
+- v0.3.0 SSD t=0.95: speed preset (0.6220 / 5.74s)
+
+n=20 sample variance hid this gap (showed 0.80 = 0.80 identity); only full HE+ revealed the real cost.
 
 ## LLaDA-8B-Base (portability target)
 
