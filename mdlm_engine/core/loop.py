@@ -54,9 +54,17 @@ class LoopConfig:
     # v0.3.0 self-speculative decoding: 0 = disabled (v0.2.x behavior).
     # When > 0, after each step's regular commit, propose this many extra
     # high-confidence masked positions and verify with one extra forward.
-    # Lossless at temperature == 0; sample-equivalent at temp > 0.
-    # Realistic acceptance ~70-90% on Dream-Coder; net 1.5-3x speedup.
+    # Lossless at temperature == 0 IF confidence threshold is high enough
+    # to avoid commit-order drift; see speculative_threshold.
     speculative_k: int = 0
+    # v0.3.0 SSD confidence gate. Day-1 v0.3.0 gate run found that
+    # threshold=0 drops pass@1 by 25 pp due to commit-order drift in
+    # masked diffusion (different commit order → different cascading
+    # context, even at temp=0). threshold=0.99 only proposes positions
+    # where the model's top-1 probability ≥ 99% — order-of-commit
+    # shouldn't matter at that confidence level. Smaller speedup but
+    # quality preserved.
+    speculative_threshold: float = 0.99
     confidence_threshold: float = 0.9
 
 
@@ -232,6 +240,7 @@ def generate_block(
                     block_start=block_start,
                     k=cfg.speculative_k,
                     temperature=cfg.temperature,
+                    confidence_threshold=cfg.speculative_threshold,
                 )
                 if len(proposal) > 0:
                     spec_result = _spec_verify(

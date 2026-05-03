@@ -55,6 +55,7 @@ def propose_and_verify(
     attn_mask_full: "torch.Tensor | str | None" = None,
     position_ids_full: "torch.Tensor | None" = None,
     temperature: float = 0.0,
+    confidence_threshold: float = 0.0,
 ) -> VerificationResult:
     """Run one round of speculation. Returns the accepted prefix.
 
@@ -75,6 +76,7 @@ def propose_and_verify(
         k=k,
         already_committed_in_step=already_committed_in_step,
         temperature=temperature,
+        confidence_threshold=confidence_threshold,
     )
     if len(proposal) == 0:
         from mdlm_engine.speculative.verify import _empty_result

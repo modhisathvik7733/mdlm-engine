@@ -61,8 +61,9 @@ def propose(
     k: int,
     already_committed_in_step: "torch.Tensor | None" = None,
     temperature: float = 0.0,
+    confidence_threshold: float = 0.0,
 ) -> Proposal:
-    """Pick ``k`` masked positions to speculate on, return token proposals.
+    """Pick up to ``k`` masked positions to speculate on, return token proposals.
 
     Parameters
     ----------
@@ -91,12 +92,21 @@ def propose(
         Currently unused (always argmax). Kept in signature so a future
         impl can sample at non-zero temperature; SSD is only strictly
         lossless at temperature == 0.
+    confidence_threshold :
+        Minimum softmax-max probability required to propose a position.
+        0.0 (default) = no filter (paper-style propose). Higher values
+        like 0.99 only propose at near-certain positions, where the
+        engine's commit order shouldn't matter — the model would predict
+        the same token regardless of when in the block it commits. This
+        was added in v0.3.0 to bound the order-dependence drift observed
+        on Dream-Coder (-25 pp pass@1 with threshold=0.0).
 
     Returns
     -------
     Proposal
         Up to ``k`` (positions, tokens, confidences) sorted by descending
-        confidence. May be empty if there are no proposable positions.
+        confidence, all with confidence ≥ ``confidence_threshold``. May
+        be empty if no proposable positions clear the threshold.
     """
     import torch
 
@@ -147,6 +157,18 @@ def propose(
     selected_block_idx = proposable_block_indices[order]
     selected_tokens = top_tok[order]
     selected_confidences = top_p[order]
+
+    # Confidence threshold filter (v0.3.0): drop proposals where the model's
+    # top-1 probability is below the threshold. Prevents commit-order drift
+    # at uncertain positions — only commit positions where the model would
+    # predict the same token regardless of intervening commits.
+    if confidence_threshold > 0.0:
+        keep = selected_confidences >= confidence_threshold
+        selected_block_idx = selected_block_idx[keep]
+        selected_tokens = selected_tokens[keep]
+        selected_confidences = selected_confidences[keep]
+        if selected_block_idx.numel() == 0:
+            return _empty_proposal(block_logits.device)
 
     # Convert block-relative → absolute positions in state.x.
     selected_positions = selected_block_idx + block_start

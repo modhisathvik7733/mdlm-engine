@@ -174,6 +174,66 @@ def test_propose_multi_sample_is_no_op():
     assert len(p) == 0
 
 
+def test_propose_confidence_threshold_filters_low_confidence():
+    """Threshold=0.99: only positions where softmax max ≥ 0.99 are proposed.
+
+    Construct logits so position 0 is near-certain (logit gap so large that
+    softmax max ≈ 1.0) and positions 1, 2, 3 are middling (softmax max ≈ 0.4).
+    propose(k=3, threshold=0.99) should return only position 0.
+    """
+    B, block_len, V = 1, 4, 10
+    block_logits = torch.zeros(B, block_len, V)
+    # Position 0: extreme logit gap → softmax max ≈ 1.0
+    block_logits[0, 0, 5] = 50.0
+    # Positions 1-3: small gap → softmax max ≈ 0.5
+    block_logits[0, 1, 3] = 1.0
+    block_logits[0, 2, 7] = 1.0
+    block_logits[0, 3, 1] = 1.0
+    mask_index = torch.ones(B, block_len, dtype=torch.bool)
+
+    p = propose(
+        block_logits, mask_index, block_start=0, k=3,
+        confidence_threshold=0.99,
+    )
+
+    # Only position 0 clears the 0.99 threshold.
+    assert len(p) == 1
+    assert int(p.positions[0]) == 0
+    assert int(p.tokens[0]) == 5
+    assert float(p.confidences[0]) >= 0.99
+
+
+def test_propose_confidence_threshold_zero_keeps_all():
+    """threshold=0 (default): no filtering."""
+    B, block_len, V = 1, 4, 10
+    block_logits = torch.zeros(B, block_len, V)
+    # All positions uniform → softmax max = 1/V = 0.1, well below 0.99
+    mask_index = torch.ones(B, block_len, dtype=torch.bool)
+
+    p = propose(
+        block_logits, mask_index, block_start=0, k=3,
+        confidence_threshold=0.0,
+    )
+
+    # leave-one rule → 3 proposals (k=3, n_proposable=4, k_eff=3).
+    assert len(p) == 3
+
+
+def test_propose_confidence_threshold_all_below_returns_empty():
+    """If no positions clear the threshold, return empty proposal."""
+    B, block_len, V = 1, 4, 10
+    # All uniform → softmax max ≈ 0.1
+    block_logits = torch.zeros(B, block_len, V)
+    mask_index = torch.ones(B, block_len, dtype=torch.bool)
+
+    p = propose(
+        block_logits, mask_index, block_start=0, k=3,
+        confidence_threshold=0.99,
+    )
+
+    assert len(p) == 0
+
+
 # ---------------------------------------------------------------------------
 # verify() tests
 # ---------------------------------------------------------------------------
