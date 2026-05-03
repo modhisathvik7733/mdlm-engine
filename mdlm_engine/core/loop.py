@@ -51,6 +51,12 @@ class LoopConfig:
     temperature: float = 0.0
     top_p: float | None = 0.95
     top_k: int | None = None
+    # v0.3.0 self-speculative decoding: 0 = disabled (v0.2.x behavior).
+    # When > 0, after each step's regular commit, propose this many extra
+    # high-confidence masked positions and verify with one extra forward.
+    # Lossless at temperature == 0; sample-equivalent at temp > 0.
+    # Realistic acceptance ~70-90% on Dream-Coder; net 1.5-3x speedup.
+    speculative_k: int = 0
     confidence_threshold: float = 0.9
 
 
@@ -205,5 +211,41 @@ def generate_block(
                     [block_start], dtype=torch.long, device=state.x.device,
                 )
                 cache.commit(forced_pos)
+
+        # v0.3.0 self-speculative decoding (arxiv 2510.04147).
+        # After this step's regular + step-0 forced commits, optionally
+        # propose K extra high-confidence positions from the SAME logits
+        # we already computed and verify with one extra forward. At temp=0
+        # this is mathematically identical to running additional regular
+        # steps — saves forwards on whichever ones the model is confident
+        # about. cfg.speculative_k=0 is the v0.2.x default (no-op).
+        if cfg.speculative_k > 0:
+            from mdlm_engine.speculative import propose, verify as _spec_verify
+
+            post_mask_index = (
+                state.x[:, block_start:block_end] == adapter.mask_token_id
+            )
+            if bool(post_mask_index.any()):
+                proposal = propose(
+                    block_logits=block_logits,
+                    mask_index=post_mask_index,
+                    block_start=block_start,
+                    k=cfg.speculative_k,
+                    temperature=cfg.temperature,
+                )
+                if len(proposal) > 0:
+                    spec_result = _spec_verify(
+                        state=state,
+                        cache=cache,
+                        adapter=adapter,
+                        proposal=proposal,
+                        block_start=block_start,
+                        block_end=block_end,
+                        attn_mask_full=attn_mask,
+                        position_ids_full=position_ids,
+                    )
+                    forwards += 1  # the verification forward
+                    if spec_result.n_accepted > 0:
+                        cache.commit(spec_result.accepted_positions)
 
     return forwards

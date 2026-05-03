@@ -1,19 +1,25 @@
-"""torch.compile wrapper with static-shape padding.
+"""torch.compile wrapper.
 
-Phase-1 strategy (from Day-1 spike #2: cpu/gpu ratio = 0.66):
-``torch.compile(mode="reduce-overhead", fullgraph=False)`` is a Phase-1
-*nice-to-have*, not load-bearing. Expected ~10-25% speedup.
+v0.2.3 day-1 test (commit ``bd8e560``) showed ``mode="reduce-overhead"``
+is fundamentally incompatible with PATH A: fast_dllm's
+``past_key[:, replace_indices] = key_states`` mutates an input tensor,
+which CUDA graphs forbid. Inductor logged
+``skipping cudagraphs due to mutated inputs`` repeatedly, so we paid the
+compile overhead with no graph reuse → 4x SLOWER than uncompiled.
 
-Why static-shape padding matters: ``mode="reduce-overhead"`` uses CUDA
-graphs, which require static input shapes. Diffusion sampling has dynamic
-shapes (the active block shrinks as positions commit). The fix: pad the
-active window to a fixed ``block_length`` and rely on the attention mask
-to ignore the pad. This keeps the captured graph reusable across all
-diffusion steps within a block.
+v0.3.0 fix:
+- Default mode is now ``"default"`` (Triton kernel fusion, no CUDA graphs).
+- Set ``torch._inductor.config.cudagraph_support_input_mutation = True``
+  before compile so dynamo doesn't bail on the in-place K/V replace
+  pattern (PyTorch ≥ 2.10 supports this flag; the user's stack is 2.11
+  cu130 which has it).
+- ``mode="reduce-overhead"`` (CUDA graphs) is still selectable via the
+  ``mode`` kwarg if a future workload runs without in-place mutations.
 
-For Phase 1 we expose a tiny helper ``maybe_compile_model`` that the
-engine can call with the user's ``--compile`` flag. We DO NOT compile
-the engine's Python loop — only the model.forward call.
+Expected speedup at v0.3.0 defaults: 1.05–1.15× from kernel fusion alone.
+The bigger speed wins for masked diffusion are MXFP8 quantization and
+self-speculative decoding (handled in their own modules); compile is a
+modest free win once the cudagraph bust is fixed.
 """
 from __future__ import annotations
 
@@ -27,20 +33,39 @@ def maybe_compile_model(
     model: "torch.nn.Module",
     *,
     enabled: bool,
-    mode: str = "reduce-overhead",
+    mode: str = "default",
     fullgraph: bool = False,
 ) -> "torch.nn.Module":
     """Return ``torch.compile(model, ...)`` if enabled, else ``model``.
 
     Wrapped in try/except: compile failures (graph breaks, dynamic shape
     issues, Blackwell + nightly incompatibilities) fall back to the
-    uncompiled model with a warning. Day-1 spike #2 informed the choice
-    of ``mode="reduce-overhead"``.
+    uncompiled model with a warning.
+
+    The default mode is ``"default"`` (no CUDA graphs) because PATH A's
+    fast_dllm in-place K/V replace at ``modeling_dream.py:487`` is
+    incompatible with CUDA graph capture (verified day-1 v0.2.3 test).
+    Pass ``mode="reduce-overhead"`` only if the workload has no in-place
+    input mutations.
+
+    For ``mode="reduce-overhead"`` we additionally enable
+    ``cudagraph_support_input_mutation`` so dynamo doesn't bail at the
+    first mutated input — the model still has to opt out of using CUDA
+    graphs at the offending op, but the rest of the forward gets graph
+    benefits.
     """
     if not enabled:
         return model
     try:
         import torch  # local import to keep top-level cheap
+
+        # Best-effort: enable mutation tolerance on stacks that support it.
+        # PyTorch ≥ 2.10 has this flag; older versions silently ignore.
+        try:
+            import torch._inductor.config as _inductor_cfg
+            _inductor_cfg.cudagraph_support_input_mutation = True
+        except (ImportError, AttributeError):
+            pass
 
         compiled = torch.compile(model, mode=mode, fullgraph=fullgraph)
         return compiled  # type: ignore[no-any-return]

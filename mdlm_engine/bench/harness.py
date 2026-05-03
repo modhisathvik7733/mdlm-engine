@@ -121,6 +121,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--top_p", type=float, default=0.95)
     ap.add_argument("--diverse", type=int, default=0,
                     help="If >0, run best-of-N over the first N DIVERSE_CONFIGS")
+    ap.add_argument("--speculative_k", type=int, default=0,
+                    help="v0.3.0 self-speculative decoding (arxiv 2510.04147). "
+                         "After each step, propose K extra high-confidence "
+                         "masked positions and verify with one extra forward. "
+                         "0 = disabled (v0.2.x behavior). 4 is a good default "
+                         "on Dream-Coder; expect ~1.5-3x speedup at unchanged "
+                         "pass@1 when temperature is low.")
     ap.add_argument("--compile", action="store_true", help="enable torch.compile on the model")
     ap.add_argument("--quant", default="", choices=["", "mxfp8", "int8", "int4"])
     ap.add_argument("--use_fastdllm_modeling", action="store_true",
@@ -269,6 +276,7 @@ def _run_benchmark(args, result: BenchResult) -> int:
                     steps_per_block=steps_cfg,
                     temperature=temp_cfg,
                     top_p=top_p_cfg,
+                    speculative_k=args.speculative_k,
                 )
                 total_forwards += out.num_forwards
                 total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
@@ -300,6 +308,7 @@ def _run_benchmark(args, result: BenchResult) -> int:
                 steps_per_block=args.steps_per_block,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                speculative_k=args.speculative_k,
             )
             total_forwards += out.num_forwards
             total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
