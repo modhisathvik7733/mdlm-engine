@@ -69,13 +69,14 @@ def generate_block(
     Mutates ``cache`` in place via ``replace_at`` (per-step) and ``commit``
     (when the scheduler decides).
 
-    **Phase-1 forward strategy:** the model sees the FULL sequence
-    (prompt + previous blocks + current block + future masks) every step.
-    This recomputes K/V for every position each step — slower than
-    fast_dllm's `dual_cache`, but correct and model-agnostic. The
-    DiffusionCache stays as engine-side bookkeeping (commit-state, etc.)
-    but is not yet wired into the model's `past_key_values` arg. That
-    wiring is Phase 2 — and is also where the actual speedup comes from.
+    **Phase-2 forward strategy:** the model sees the FULL sequence every
+    step, but with ``use_cache=True``. Adapters that detected fast_dllm's
+    ``dual_cache`` extension (PATH A) reuse K/V at *committed* positions
+    via in-place writes through ``cache.to_legacy_kv()`` aliases — only
+    masked positions recompute K/V. Adapters that lack the extension
+    (PATH C, e.g., LLaDA on stock modeling) silently fall back to
+    ``use_cache=False`` inside ``adapter.forward`` so this loop stays
+    model-agnostic. Speedup comes from PATH A; PATH C matches v0.1.0 speed.
     """
     forwards = 0
     block_start, block_end = state.block_start, state.block_end
@@ -97,7 +98,7 @@ def generate_block(
             attention_mask=attn_mask,
             position_ids=position_ids,
             diffusion_cache=cache,
-            use_cache=False,
+            use_cache=True,
         )
         forwards += 1
 

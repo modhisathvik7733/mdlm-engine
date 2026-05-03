@@ -162,9 +162,18 @@ class LLaDAAdapter(ModelAdapter):
         (LLaDA's forward doesn't accept it), and we pass attention_bias=None
         (LLaDA-specific; default behavior).
 
-        Phase 1: ``diffusion_cache`` and ``use_cache`` are intentionally
-        unused — caching is engine-side. Model-side cache reuse layers in
-        with the day-7 ops module.
+        **v0.2.0 cache deferral.** The day-1 spike confirmed LLaDA's forward
+        accepts ``past_key_values`` + ``use_cache`` but NOT fast_dllm's
+        ``dual_cache`` / ``replace_position`` extensions
+        (`scripts/day1_spike/01_llada_spike.json:forward_accepts`). Standard
+        HF caching is semantically awkward for masked diffusion — past_key_values
+        is append-only (`torch.cat([past, new], dim=-2)`), but diffusion needs
+        in-place replace at masked positions. Without the fast_dllm extensions
+        we can't safely reuse the cache, so we keep ``use_cache=False`` and
+        ignore the engine's request. LLaDA still runs end-to-end at v0.1.0
+        speed; full caching support is a v0.2.1 follow-up that requires either
+        patching LLaDA's modeling code with fast_dllm-style extensions or
+        building a per-step write-back path through ``update_from_model_output``.
         """
         del position_ids, diffusion_cache, use_cache  # see docstring
         kwargs = dict(
