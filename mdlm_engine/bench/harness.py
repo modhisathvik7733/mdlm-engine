@@ -201,6 +201,34 @@ def _run_benchmark(args, result: BenchResult) -> int:
         model = AutoModel.from_pretrained(
             args.model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
         ).to("cuda").eval()
+
+    # v0.3.0 Lever A: MXFP8 quantization via torchao. Apply AFTER the model
+    # is on CUDA in eval mode — torchao's quantize_ operates on the live
+    # nn.Module and replaces linear layer weights in-place with FP8.
+    # Day-1 viability spike (scripts/v0_3_0_spike.sh) gates this; ship only
+    # if logit max-abs-diff vs bf16 < 0.05.
+    if args.quant == "mxfp8":
+        try:
+            from torchao.quantization import (
+                Float8DynamicActivationFloat8WeightConfig, quantize_,
+            )
+        except ImportError as e:
+            raise SystemExit(
+                f"--quant mxfp8 requires torchao>=0.17.0; install with "
+                f"`pip install --break-system-packages 'torchao>=0.17.0'`. "
+                f"Original error: {e}"
+            )
+        print("  applying MXFP8 quantization via torchao ...")
+        quantize_(model, Float8DynamicActivationFloat8WeightConfig())
+        print("  quantize_() complete (linear weights now FP8).")
+    elif args.quant in ("int8", "int4"):
+        # Phase 1 viability spike showed int8/int4 NaN'd on Blackwell + nightly.
+        # Refuse loudly rather than silently doing nothing.
+        raise SystemExit(
+            f"--quant {args.quant} is documented broken on RTX 5090 + "
+            f"PyTorch nightly cu128/cu130 (NaN cascades). Use mxfp8 instead."
+        )
+
     model = maybe_compile_model(model, enabled=args.compile)
 
     adapter_cls = get_adapter_for(args.adapter)
