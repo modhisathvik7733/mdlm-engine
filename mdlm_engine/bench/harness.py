@@ -116,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="If >0, run best-of-N over the first N DIVERSE_CONFIGS")
     ap.add_argument("--compile", action="store_true", help="enable torch.compile on the model")
     ap.add_argument("--quant", default="", choices=["", "mxfp8", "int8", "int4"])
+    ap.add_argument("--use_fastdllm_modeling", action="store_true",
+                    help="Dream only: load with fast_dllm-patched modeling (PATH A; ~2x speedup). "
+                         "Overlays mdlm_engine/models/dream_fastdllm/modeling_dream.py onto the "
+                         "HF cache copy at load time.")
     ap.add_argument("--out", type=Path, default=Path("bench_results.json"))
     ap.add_argument("--no_run", action="store_true",
                     help="Skip actual generation (CPU self-test only)")
@@ -167,9 +171,22 @@ def _run_benchmark(args, result: BenchResult) -> int:
 
     print(f"Loading {args.model_path} ...")
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
-    model = AutoModel.from_pretrained(
-        args.model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
-    ).to("cuda").eval()
+    if args.use_fastdllm_modeling:
+        if args.adapter != "dream":
+            print(f"  WARNING: --use_fastdllm_modeling is dream-only; ignoring for adapter={args.adapter}")
+            model = AutoModel.from_pretrained(
+                args.model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+            ).to("cuda").eval()
+        else:
+            from mdlm_engine.models.dream_fastdllm import load_dream_fastdllm
+            print("  using fast_dllm-patched modeling_dream.py (PATH A)")
+            model = load_dream_fastdllm(
+                args.model_path, torch_dtype=torch.bfloat16,
+            ).to("cuda").eval()
+    else:
+        model = AutoModel.from_pretrained(
+            args.model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+        ).to("cuda").eval()
     model = maybe_compile_model(model, enabled=args.compile)
 
     adapter_cls = get_adapter_for(args.adapter)

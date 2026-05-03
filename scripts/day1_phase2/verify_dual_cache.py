@@ -148,10 +148,14 @@ def main() -> int:
         )
     elif dream_supports:
         verdict = (
-            "PATH B — past_key_values supported but dual_cache extension "
-            "missing. Phase 2 falls back to standard HF Cache with concat-only "
-            "updates. Speedup will be smaller (~1.3-1.5× instead of 2×) since "
-            "we can't do in-place K/V replacement at masked positions."
+            "PATH B — past_key_values supported but dual_cache extension missing. "
+            "Stock HF caching is APPEND-ONLY (torch.cat([past, new], dim=-2)) and "
+            "CANNOT accelerate masked diffusion (which passes the full sequence "
+            "each step and needs in-place K/V replace at masked positions). "
+            "DreamAdapter collapses PATH B → PATH C with a one-time warning. "
+            "For the v0.2.0 speedup, load Dream via "
+            "`mdlm_engine.models.dream_fastdllm.load_dream_fastdllm()` "
+            "(or the bench harness flag --use_fastdllm_modeling)."
         )
     else:
         verdict = (
