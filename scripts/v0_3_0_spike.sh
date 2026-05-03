@@ -79,19 +79,20 @@ from transformers import AutoTokenizer
 tok = AutoTokenizer.from_pretrained(DREAM_PATH, trust_remote_code=True)
 model_bf16 = load_dream_fastdllm(torch_dtype=torch.bfloat16).to("cuda").eval()
 
-# Build a prompt and run a forward. Match how DreamAdapter's apply_chat_template would.
+# Build a prompt. We deliberately pass attention_mask=None to the model: PyTorch
+# 2.11's SDPA rejects long-typed attention masks against bf16 queries, and the
+# spike just wants a logit comparison (no padding to mask out — single prompt).
+# Our actual engine handles this in DreamAdapter (passes None on iter pass).
 chat = tok.apply_chat_template(
     [{"role": "user", "content": PROMPT_TEXT}],
     return_tensors="pt", return_dict=True, add_generation_prompt=True,
 )
 input_ids = chat["input_ids"].to("cuda")
-attn = chat.get("attention_mask")
-attn = attn.to("cuda") if attn is not None else None
 
 print(f"   input_ids.shape = {tuple(input_ids.shape)}")
 
 with torch.inference_mode():
-    out_bf16 = model_bf16(input_ids=input_ids, attention_mask=attn, use_cache=False)
+    out_bf16 = model_bf16(input_ids=input_ids, attention_mask=None, use_cache=False)
 logits_bf16 = (out_bf16.logits if hasattr(out_bf16, "logits") else out_bf16[0]).float()
 print(f"   bf16 logits.shape = {tuple(logits_bf16.shape)}, dtype before .float() was {(out_bf16.logits if hasattr(out_bf16, 'logits') else out_bf16[0]).dtype}")
 
@@ -138,7 +139,7 @@ print()
 
 print("[4/4] Running quantized forward + comparing logits ...")
 with torch.inference_mode():
-    out_q = model_q(input_ids=input_ids, attention_mask=attn, use_cache=False)
+    out_q = model_q(input_ids=input_ids, attention_mask=None, use_cache=False)
 logits_q = (out_q.logits if hasattr(out_q, "logits") else out_q[0]).float()
 print(f"   quant logits.shape = {tuple(logits_q.shape)}")
 
