@@ -210,15 +210,36 @@ def _run_benchmark(args, result: BenchResult) -> int:
         _write(result, args.out)
         return 1
 
-    # Single-shot path
-    engine = DiffusionEngine(
-        model, adapter=adapter,
-        cache=args.cache, sampler=args.sampler, scheduler=args.scheduler,
-    )
+    # Diverse best-of-N or single-shot dispatch.
+    diverse_n = args.diverse if args.diverse > 0 else 0
+    if diverse_n > len(DIVERSE_CONFIGS):
+        print(f"  --diverse {diverse_n} > len(DIVERSE_CONFIGS)={len(DIVERSE_CONFIGS)}; clamping")
+        diverse_n = len(DIVERSE_CONFIGS)
+
+    if diverse_n > 0:
+        # Build N engines (one per config). Engines are cheap — they share
+        # the loaded model and adapter; only sampler_fn / scheduler_fn /
+        # cache_kind differ.
+        engines = []
+        for sampler_name, scheduler_name, _temp, _top_p, _steps in DIVERSE_CONFIGS[:diverse_n]:
+            eng = DiffusionEngine(
+                model, adapter=adapter,
+                cache=args.cache, sampler=sampler_name, scheduler=scheduler_name,
+            )
+            engines.append(eng)
+        print(f"  diverse best-of-{diverse_n}: 8 configs (sampler/scheduler/temp/top_p/steps)")
+        for j, (s, sch, t_, p_, st) in enumerate(DIVERSE_CONFIGS[:diverse_n]):
+            print(f"    [{j}] sampler={s:13s} scheduler={sch:11s} temp={t_:.1f} top_p={p_:.2f} steps={st}")
+    else:
+        engine = DiffusionEngine(
+            model, adapter=adapter,
+            cache=args.cache, sampler=args.sampler, scheduler=args.scheduler,
+        )
 
     n_pass = 0
     total_tokens = 0
     total_forwards = 0
+    total_attempts = 0
     t_start = time.time()
     torch.cuda.reset_peak_memory_stats()
 
@@ -227,29 +248,74 @@ def _run_benchmark(args, result: BenchResult) -> int:
         prompt_ids = adapter.apply_chat_template(
             [{"role": "user", "content": _format_prompt(row['prompt'])}],
         ).to("cuda")
-        out = engine.generate(
-            prompt_ids,
-            max_new_tokens=args.max_new_tokens,
-            block_length=args.block_length,
-            steps_per_block=args.steps_per_block,
-            temperature=args.temperature,
-            top_p=args.top_p,
-        )
-        total_forwards += out.num_forwards
-        total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
-        decoded = tok.decode(
-            out.sequences[0, prompt_ids.shape[1]:].cpu().tolist(),
-            skip_special_tokens=True,
-        )
-        passed = _check_completion(decoded, row)
-        if passed:
-            n_pass += 1
-        result.per_problem.append({
-            "task_id": task_id,
-            "passed": bool(passed),
-            "seconds": time.time() - t_problem_start,
-            "completion_len": int(out.sequences.shape[1] - prompt_ids.shape[1]),
-        })
+
+        if diverse_n > 0:
+            # First-pass-acceptance best-of-N: try configs in order, stop at
+            # first success. Records n_attempts per problem so cost can be
+            # amortized properly (not all problems need all N).
+            passed = False
+            n_attempts_this = 0
+            last_decoded = ""
+            last_completion_len = 0
+            for engine_idx, eng in enumerate(engines):
+                cfg = DIVERSE_CONFIGS[engine_idx]
+                _, _, temp_cfg, top_p_cfg, steps_cfg = cfg
+                n_attempts_this += 1
+                total_attempts += 1
+                out = eng.generate(
+                    prompt_ids,
+                    max_new_tokens=args.max_new_tokens,
+                    block_length=args.block_length,
+                    steps_per_block=steps_cfg,
+                    temperature=temp_cfg,
+                    top_p=top_p_cfg,
+                )
+                total_forwards += out.num_forwards
+                total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
+                decoded = tok.decode(
+                    out.sequences[0, prompt_ids.shape[1]:].cpu().tolist(),
+                    skip_special_tokens=True,
+                )
+                last_decoded = decoded
+                last_completion_len = int(out.sequences.shape[1] - prompt_ids.shape[1])
+                if _check_completion(decoded, row):
+                    passed = True
+                    break
+            if passed:
+                n_pass += 1
+            result.per_problem.append({
+                "task_id": task_id,
+                "passed": bool(passed),
+                "seconds": time.time() - t_problem_start,
+                "completion_len": last_completion_len,
+                "n_attempts": n_attempts_this,
+                "winning_config_idx": (n_attempts_this - 1) if passed else -1,
+            })
+            decoded = last_decoded
+        else:
+            out = engine.generate(
+                prompt_ids,
+                max_new_tokens=args.max_new_tokens,
+                block_length=args.block_length,
+                steps_per_block=args.steps_per_block,
+                temperature=args.temperature,
+                top_p=args.top_p,
+            )
+            total_forwards += out.num_forwards
+            total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
+            decoded = tok.decode(
+                out.sequences[0, prompt_ids.shape[1]:].cpu().tolist(),
+                skip_special_tokens=True,
+            )
+            passed = _check_completion(decoded, row)
+            if passed:
+                n_pass += 1
+            result.per_problem.append({
+                "task_id": task_id,
+                "passed": bool(passed),
+                "seconds": time.time() - t_problem_start,
+                "completion_len": int(out.sequences.shape[1] - prompt_ids.shape[1]),
+            })
 
         # Print the first 3 completions so we can debug "0% pass@1" at a glance.
         if i < 3:
@@ -261,13 +327,29 @@ def _run_benchmark(args, result: BenchResult) -> int:
 
         if (i + 1) % 5 == 0:
             elapsed = time.time() - t_start
-            print(f"[{i+1}/{len(items)}] pass@1 = {n_pass/(i+1):.4f}  "
-                  f"avg = {elapsed/(i+1):.2f}s/problem")
+            if diverse_n > 0:
+                avg_attempts = total_attempts / (i + 1)
+                print(f"[{i+1}/{len(items)}] pass@N = {n_pass/(i+1):.4f}  "
+                      f"avg attempts = {avg_attempts:.2f}  "
+                      f"avg = {elapsed/(i+1):.2f}s/problem")
+            else:
+                print(f"[{i+1}/{len(items)}] pass@1 = {n_pass/(i+1):.4f}  "
+                      f"avg = {elapsed/(i+1):.2f}s/problem")
 
     wall = time.time() - t_start
     result.n_problems_run = len(items)
-    result.pass_at_1_single_shot = n_pass / max(1, len(items))
-    result.pass_at_1_best_of_n = result.pass_at_1_single_shot  # diverse path TBD
+    if diverse_n > 0:
+        # In diverse mode, the "single-shot" rate is what config 0 (the
+        # primary preset) would have achieved alone. Recover it from
+        # per_problem records: if winning_config_idx == 0, config 0 passed.
+        n_pass_config0 = sum(
+            1 for p in result.per_problem if p.get("winning_config_idx") == 0
+        )
+        result.pass_at_1_single_shot = n_pass_config0 / max(1, len(items))
+        result.pass_at_1_best_of_n = n_pass / max(1, len(items))
+    else:
+        result.pass_at_1_single_shot = n_pass / max(1, len(items))
+        result.pass_at_1_best_of_n = result.pass_at_1_single_shot
     result.seconds_per_problem = wall / max(1, len(items))
     result.total_forwards = total_forwards
     result.tokens_per_second = total_tokens / wall if wall > 0 else 0.0
