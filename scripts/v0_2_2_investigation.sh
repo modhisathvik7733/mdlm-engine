@@ -44,7 +44,7 @@ python3 -m mdlm_engine.bench.harness \
     --temperature 0.2 \
     --top_p 0.95 \
     --out "$RESULTS_DIR/pathBC.json" 2>&1 | \
-    tee "$RESULTS_DIR/pathBC.log" | tail -8
+    tee "$RESULTS_DIR/pathBC.log"
 echo
 
 echo "[2/3] PATH A (fast_dllm-patched modeling, dual_cache) — limit=$LIMIT"
@@ -63,7 +63,7 @@ python3 -m mdlm_engine.bench.harness \
     --temperature 0.2 \
     --top_p 0.95 \
     --out "$RESULTS_DIR/pathA.json" 2>&1 | \
-    tee "$RESULTS_DIR/pathA.log" | tail -8
+    tee "$RESULTS_DIR/pathA.log"
 echo
 
 echo "[3/3] Per-problem diff"
