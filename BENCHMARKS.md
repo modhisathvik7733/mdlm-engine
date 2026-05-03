@@ -15,21 +15,27 @@ Canonical results log for every tagged release. Each row is a real measurement o
 | v0.3.0 candidate (no SSD) | 2026-05-04 | 20 | 512 | 9.82 | 25.4 | 0.800 (16/20) | A |
 | v0.3.0 candidate (SSD t=0.95) | 2026-05-04 | 20 | 512 | 4.19 | 52.7 | 0.800 (16/20) | A + SSD Redesign C |
 | v0.3.0 (SSD t=0.90, drift) | 2026-05-04 | 20 | 512 | 3.93 | 57.8 | 0.600 (12/20) | A + SSD (too aggressive) |
-| **v0.3.0 (SSD t=0.95) full HE+** | **2026-05-04** | **164** | **512** | **5.74** | **51.2** | **0.6220 (102/164)** | **A + SSD Redesign C** |
+| v0.3.0 (SSD t=0.95) full HE+ | 2026-05-04 | 164 | 512 | 5.74 | 51.2 | 0.6220 (102/164) | A + SSD Redesign C (speed preset) |
+| **v0.3.0 (SSD t=0.99) full HE+** | **2026-05-04** | **164** | **512** | **6.44** | **45.7** | **0.6524 (107/164)** | **A + SSD Redesign C (default)** |
 
 The n=20 numbers (0.900-0.950) inflated because the first 20 HE+ problems are easy and fit in max_new=256. **The honest baseline is 0.6707 on full HE+ at v0.2.2's defaults.** Slightly above DiffuCoder-7B-cpGRPO's 0.652 published number.
 
-**v0.3.0 SSD t=0.95 vs v0.2.2 baseline (n=164, both at PATH A 512, temp=0.2, entropy, top_p=0.95):**
-- pass@1: 0.6707 → **0.6220** = **-4.87 pp** (real but small quality cost)
-- s/problem: 11.60 → **5.74** = **2.02× faster**
-- forwards: 38170 → **22791** = **-40%**
-- VRAM: 16.17 GB → 16.29 GB (unchanged)
+**v0.3.0 SSD threshold sweep on full HE+ (n=164, PATH A 512, temp=0.2, entropy, top_p=0.95):**
 
-The n=20 "0.80 = 0.80" identity at this config was sample-size noise — full HE+ shows there IS a real ~5 pp pass@1 cost from SSD's argmax-vs-argmax verify diverging slightly from the regular sampler's stochastic outputs at temp=0.2. Trade-off is real but modest: ~2× speedup costs ~5 pp pass@1.
+| Threshold | pass@1 | Δ vs v0.2.2 | s/problem | speedup | forwards |
+|---:|---:|---:|---:|---:|---:|
+| no SSD (v0.2.2) | 0.6707 | 0 | 11.60 | 1.00× | 38170 |
+| **t=0.99 (v0.3.0 default)** | **0.6524** | **-1.83 pp** | **6.44** | **1.80×** | **25729** |
+| t=0.95 (speed preset) | 0.6220 | -4.87 pp | 5.74 | 2.02× | 22791 |
+
+**Threshold=0.99 is the v0.3.0 default — within ~2 pp of v0.2.2 quality at 1.80× speed.** The 3-problem deficit (107 vs 110 pass) is well within n=164 sampling noise. t=0.95 ships as an opt-in speed preset for users who can absorb the 5 pp quality cost.
+
+**Why t=0.99 holds quality where t=0.95 doesn't:** At top_p=0.95 sampling, when the model's top-1 raw probability is exactly 0.95-0.96, top-p sampling MIGHT include a second token. SSD always picks #1 → drift in those edge cases. At threshold=0.99 the gap to top-2 is wider, so top-p sampling at temp=0.2 always picks the argmax. SSD's commit aligns deterministically with what the regular sampler would have committed.
 
 **Comparison with published baselines on full HE+ single-shot:**
 - mdlm-engine v0.2.2 (no SSD): 0.6707 — slightly above DiffuCoder
-- **mdlm-engine v0.3.0 (SSD t=0.95): 0.6220** — slightly below DiffuCoder (0.652) at 2× the speed
+- **mdlm-engine v0.3.0 (SSD t=0.99): 0.6524** — within 1.3 pp of DiffuCoder (0.652) at 1.80× the speed
+- mdlm-engine v0.3.0 (SSD t=0.95): 0.6220 — slightly below DiffuCoder, 2.02× speed
 - DiffuCoder-7B-cpGRPO (paper, no engine info): 0.652
 - LLaDA-8B-Instruct (paper): 0.494
 
@@ -74,22 +80,21 @@ Redesign C runs SSD BEFORE the sampler at every step on the FULL current mask. A
 
 ### v0.3.0 candidate breakdown — full HE+ (n=164, 2026-05-04)
 
-| metric | v0.2.2 baseline (recorded) | v0.3.0 SSD t=0.95 (measured) | Δ |
+| metric | v0.2.2 baseline | **v0.3.0 default (SSD t=0.99)** | v0.3.0 speed (SSD t=0.95) |
 |---|---:|---:|---:|
-| Settings | PATH A 512, temp=0.2, entropy, top_p=0.95 | + speculative_k=1, threshold=0.95 | (SSD added) |
-| pass@1 | **0.6707** (110/164) | **0.6220** (102/164) | **-4.87 pp** |
-| s/problem | 11.60 | **5.74** | **2.02× faster** |
-| tokens/sec | 25.1 | **51.2** | **+104%** |
-| total forwards | 38170 | 22791 | **-40%** |
-| peak VRAM (GB) | 16.17 | 16.29 | unchanged |
+| Settings | PATH A 512, temp=0.2, entropy, top_p=0.95 | + speculative_k=1, threshold=0.99 | + speculative_k=1, threshold=0.95 |
+| pass@1 | 0.6707 (110/164) | **0.6524 (107/164)** | 0.6220 (102/164) |
+| Δ vs v0.2.2 | 0 | **-1.83 pp** (3 problems) | -4.87 pp (8 problems) |
+| s/problem | 11.60 | **6.44** | 5.74 |
+| Speedup | 1.00× | **1.80×** | 2.02× |
+| tokens/sec | 25.1 | 45.7 | 51.2 |
+| total forwards | 38170 | 25729 (-33%) | 22791 (-40%) |
+| peak VRAM (GB) | 16.17 | 16.29 | 16.29 |
 
-The 2× speedup is mechanical (forward count drops 40%, wall-clock follows). The 4.87 pp pass@1 cost is the price of approximating temp=0.2 sampling with argmax at high-confidence positions — at n=164 the imperfect approximation accumulates to ~8 problem-level disagreements (102 pass vs 110 pass).
-
-This is a real **speed/quality trade-off offering**, not a strict improvement:
-- v0.2.2 default: quality preset (0.6707 / 11.60s)
-- v0.3.0 SSD t=0.95: speed preset (0.6220 / 5.74s)
-
-n=20 sample variance hid this gap (showed 0.80 = 0.80 identity); only full HE+ revealed the real cost.
+**v0.3.0 ships TWO presets, with threshold=0.99 as the default.** Users who want strict quality keep using v0.2.2; users who want speed pick the threshold knob:
+- `--speculative_k 0` (or omit): v0.2.2 quality (0.6707 / 11.60s)
+- `--speculative_k 1 --speculative_threshold 0.99`: **v0.3.0 default — 1.80× faster, near-lossless** (0.6524 / 6.44s)
+- `--speculative_k 1 --speculative_threshold 0.95`: v0.3.0 speed preset — 2.02× faster, -5 pp (0.6220 / 5.74s)
 
 ## LLaDA-8B-Base (portability target)
 
