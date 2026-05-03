@@ -129,6 +129,22 @@ def test_dream_adapter_warns_when_no_pkv_support():
         DreamAdapter(model=model, tokenizer=_StubTok())
 
 
+def test_dream_adapter_warns_on_path_b_about_fallback():
+    """PATH B (stock HF caching, no fast_dllm extensions) must warn loudly
+    that we're falling back to PATH C. Stock HF caching is append-only and
+    can't accelerate masked diffusion."""
+    from mdlm_engine.adapters.dream import DreamAdapter
+
+    def forward(self, input_ids=None, attention_mask=None, position_ids=None,
+                past_key_values=None, use_cache=None):
+        raise NotImplementedError
+
+    model = _make_model(forward)
+    with pytest.warns(RuntimeWarning, match="dual_cache"):
+        adapter = DreamAdapter(model=model, tokenizer=_StubTok())
+    assert adapter._caps.path == "B"  # detection still accurate
+
+
 def test_dream_adapter_no_warning_on_path_a():
     """A fully-fast_dllm-patched model should NOT trigger the cap warning."""
     import warnings
@@ -155,6 +171,7 @@ def test_dream_adapter_caps_attached_to_instance():
     def forward(self, input_ids=None, past_key_values=None, use_cache=None):
         raise NotImplementedError
 
-    adapter = DreamAdapter(model=_make_model(forward), tokenizer=_StubTok())
+    with pytest.warns(RuntimeWarning):  # PATH B fires the fallback warning
+        adapter = DreamAdapter(model=_make_model(forward), tokenizer=_StubTok())
     assert isinstance(adapter._caps, _DreamCaps)
     assert adapter._caps.path == "B"

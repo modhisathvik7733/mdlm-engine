@@ -54,11 +54,16 @@ class _DreamCaps:
     Drives the cache-wiring path inside ``DreamAdapter.forward``:
 
     - PATH A: full fast_dllm extensions (``dual_cache`` + ``replace_position``).
-      Use the fastest path with in-place K/V replacement at masked positions.
+      In-place K/V replacement at masked positions — the fast path. Requires
+      the fast_dllm-patched ``modeling_dream.py``; the upstream HF Hub model
+      is plain HF and does NOT include these kwargs.
     - PATH B: standard HF caching (``past_key_values`` + ``use_cache``) but no
-      fast_dllm extensions. Fall back to alias-based reads only; speedup
-      is smaller but still meaningful.
-    - PATH C: no caching at all. Match v0.1.0 behavior (``use_cache=False``).
+      fast_dllm extensions. **Cannot speed up masked diffusion** — stock HF
+      caching is append-only (``torch.cat([past, new], dim=-2)``), and masked
+      diffusion needs in-place replace at masked positions. We therefore
+      collapse PATH B → PATH C inside ``forward()`` with a one-time warning.
+      The detection itself stays as 'B' so the caps record matches reality.
+    - PATH C: no caching support. Match v0.1.0 behavior (``use_cache=False``).
 
     Detection is one-time at adapter construction. ``inspect.signature``
     is cheap; we keep the result cached on ``self._caps``.
@@ -131,15 +136,25 @@ class DreamAdapter(ModelAdapter):
         # `replace_position` extensions — see scripts/day1_phase2/verify_dual_cache.py
         # for the spike that determines this on a real HF Hub model.
         self._caps = _inspect_dream_caps(model)
-        if not self._caps.accepts_past_key_values:
+        if self._caps.path != "A":
             import warnings
-            warnings.warn(
-                "DreamAdapter: model.forward doesn't accept past_key_values. "
-                "Phase-2 cache wiring will fall back to use_cache=False, "
-                "matching v0.1.0 speed (~10 s/problem). Use a fast_dllm-patched "
-                "Dream-Coder modeling for the v0.2.0 speedup.",
-                RuntimeWarning, stacklevel=2,
-            )
+            if self._caps.path == "B":
+                msg = (
+                    "DreamAdapter: model.forward accepts past_key_values but "
+                    "lacks fast_dllm's dual_cache/replace_position extensions. "
+                    "Stock HF caching is append-only and cannot accelerate "
+                    "masked diffusion (PATH B → PATH C fallback). Speed will "
+                    "match v0.1.0 (~10 s/problem). For the v0.2.0 speedup, "
+                    "load Dream from a fast_dllm-patched modeling_dream.py."
+                )
+            else:
+                msg = (
+                    "DreamAdapter: model.forward doesn't accept past_key_values. "
+                    "Phase-2 cache wiring will fall back to use_cache=False, "
+                    "matching v0.1.0 speed (~10 s/problem). Use a fast_dllm-patched "
+                    "Dream-Coder modeling for the v0.2.0 speedup."
+                )
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     # ------------------------------------------------------------------
     # Vocab properties
@@ -257,7 +272,13 @@ class DreamAdapter(ModelAdapter):
         )
 
         # Decide path: caps + caller's `use_cache` request both must permit caching.
-        wiring = self._caps.path if (use_cache and diffusion_cache is not None) else "C"
+        # PATH B is detected accurately but collapsed to PATH C here — see
+        # `_DreamCaps` docstring for why stock HF caching can't accelerate
+        # masked diffusion (append-only torch.cat vs needed in-place replace).
+        if use_cache and diffusion_cache is not None and self._caps.path == "A":
+            wiring = "A"
+        else:
+            wiring = "C"
 
         if wiring == "A":
             kwargs["past_key_values"] = diffusion_cache.to_legacy_kv()  # aliases
@@ -267,14 +288,8 @@ class DreamAdapter(ModelAdapter):
             # K/V for (= NOT yet committed). commit_state() is True at
             # frozen/committed positions; invert.
             kwargs["replace_position"] = ~diffusion_cache.commit_state()
-        elif wiring == "B":
-            # Standard HF caching: pass past_key_values + use_cache=True, no
-            # in-place extension. The model returns concat'd past_key_values;
-            # we write those back via update_from_model_output below.
-            kwargs["past_key_values"] = diffusion_cache.to_legacy_kv()
-            kwargs["use_cache"] = True
         else:
-            # PATH C: v0.1.0 behavior. No caching.
+            # PATH C (or PATH B collapsed to C): v0.1.0 behavior. No caching.
             kwargs["use_cache"] = False
 
         out = self.model(**kwargs)
