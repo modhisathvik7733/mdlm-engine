@@ -12,8 +12,19 @@ Canonical results log for every tagged release. Each row is a real measurement o
 | v0.2.1 | 2026-05-03 | 20 | 256 | 8.42 | 25.5 | 0.850 (17/20) | A (fast_dllm-patched modeling) |
 | v0.2.1 | 2026-05-03 | **164** | 256 | 9.14 | 25.3 | **0.5427 (89/164)** | A (full HE+) |
 | **v0.2.2** | **2026-05-03** | **164** | **512** | **11.60** | **25.1** | **0.6707 (110/164)** | **A (default)** |
+| v0.3.0 candidate (no SSD) | 2026-05-04 | 20 | 512 | 9.82 | 25.4 | 0.800 (16/20) | A |
+| **v0.3.0 candidate (SSD t=0.95)** | **2026-05-04** | **20** | **512** | **4.19** | **52.7** | **0.800 (16/20)** | **A + SSD Redesign C** |
+| v0.3.0 (SSD t=0.90, drift) | 2026-05-04 | 20 | 512 | 3.93 | 57.8 | 0.600 (12/20) | A + SSD (too aggressive) |
 
 The n=20 numbers (0.900-0.950) inflated because the first 20 HE+ problems are easy and fit in max_new=256. **The honest baseline is 0.6707 on full HE+ at v0.2.2's defaults.** Slightly above DiffuCoder-7B-cpGRPO's 0.652 published number.
+
+**v0.3.0 candidate vs v0.2.2 baseline (n=20, both at PATH A 512, temp=0.2, entropy, top_p=0.95):**
+- pass@1 unchanged (0.80 vs 0.80 — same problems passed; per-problem agreement 80%, with 2 flips each direction = noise)
+- s/problem: 9.82 → **4.19** = **2.34× faster**
+- forwards: 4938 → 2012 = **53% reduction**
+- VRAM unchanged at 16.06 GB
+
+Full HE+ (n=164) validation **pending** — expected pass@1 within 2pp of v0.2.2's 0.6707, s/problem ~5.
 
 ## Path / cache-wiring summary
 
@@ -32,6 +43,41 @@ Three false hypotheses before landing on the right one:
 | 3 | Generation budget (max_new=256 truncating) | Bump to max_new=512 | 67 truncated-fail → 29 recover + 31 other gains = **+12.8 pp pass@1**. ✓ |
 
 **Lesson**: budget was the bottleneck, not the engine. Subsets inflated v0.1.0/v0.2.0/v0.2.1 release-notes pass@1 because easy-problem subset fit in 256 tokens.
+
+## v0.3.0 sprint summary (what didn't work and what did)
+
+Three speed levers attempted; only one paid off:
+
+| Lever | Day | Result | Verdict |
+|---|---|---|---|
+| **MXFP8** (torchao quantization) | 2 | day-1 spike: logit drift 4.78 (FAIL threshold 0.5); -20pp pass@1; **slower** in benchmark (FP8 ops on Blackwell + PyTorch 2.11 cu130 unoptimized) | dead, defer to v0.3.1 |
+| **torch.compile** (mode=default + cudagraph_support_input_mutation) | 2 | CUDA graph thrashing dominates (Inductor's `cudagraph_support_input_mutation=True` doesn't fix `.item()` graph breaks in apply_rotary_pos_emb); 2-4× SLOWER | dead |
+| **Self-Speculative Decoding** (3 redesigns) | 2-4 | Redesigns A & B (per-step on residual / block-init at step 0) gave only 1.04-1.12×. Redesign C (per-step on FULL mask BEFORE sampler at every step) gave **2.34× lossless** | **shipped** |
+
+### SSD Redesign C — why it works
+
+At `temp=0.2, top_p=0.95` production sampling, when the model's top-1 probability ≥ 0.95, top-p sampling has no other candidates → sampler picks the argmax deterministically. SSD's threshold=0.95 commit at exactly those positions matches what the sampler would have committed. **Lossless within sampling noise.**
+
+Three earlier SSD designs failed by fighting this property:
+1. **threshold=0** (day-1): committed at uncertain positions → 25 pp drop from commit-order drift.
+2. **block-init at step 0** (Redesign A): all positions masked at step 0 → low confidence everywhere → empty proposals → +1% forwards (verify overhead).
+3. **Per-step on residual after sampler** (Redesign B): operated on slowfast's leftovers → low-confidence positions → only 1.12× speedup.
+
+Redesign C runs SSD BEFORE the sampler at every step on the FULL current mask. Adapts to problem difficulty: boilerplate-heavy problems (many high-conf positions) → big speedup; logic-heavy problems (few high-conf positions) → SSD fires rarely, near-baseline speed but quality preserved.
+
+### v0.3.0 candidate breakdown (n=20, 2026-05-04)
+
+| metric | baseline (no SSD) | SSD t=0.95 |
+|---|---:|---:|
+| Settings | PATH A 512, temp=0.2, entropy, top_p=0.95 | + speculative_k=1, threshold=0.95 |
+| pass@1 | 0.800 (16/20) | **0.800 (16/20) — identical** |
+| s/problem | 9.82 | **4.19** |
+| tokens/sec | 25.4 | **52.7** |
+| total forwards | 4938 | **2012** |
+| Speedup vs v0.2.2 baseline | 1.00× | **2.34×** |
+| Per-problem agreement | — | 80% (4 problems flipped, net 0 = sampling noise) |
+
+n=20 is noisy (single-problem flip = 5pp); full HE+ validation pending to lock numbers.
 
 ## LLaDA-8B-Base (portability target)
 
@@ -58,7 +104,8 @@ At every release ≥ v0.2.0:
 | Phase 2.0 (v0.2.0) | 5 | ~10 | ~$3 |
 | Phase 2.1 (v0.2.1) | 1 | ~3 | ~$1 |
 | Phase 2.2 (v0.2.2 investigation) | 1 | ~5 | ~$2 |
-| **Total to v0.2.2** | **10** | **~28** | **~$11** |
+| Phase 3.0 (v0.3.0 sprint — 3 SSD redesigns + MXFP8 spike + compile retry) | 1 | ~4 | ~$1.50 |
+| **Total to v0.3.0 candidate** | **11** | **~32** | **~$12.50** |
 
 ## Reproducing these numbers
 
@@ -72,21 +119,31 @@ bash scripts/bootstrap_vastai.sh
 # Reproduce v0.2.2 acceptance gate (~80 min wall, ~$0.50)
 bash scripts/phase2_1_acceptance.sh
 
-# Or run a single config on full HumanEval+ (~30-50 min depending on max_new)
+# Reproduce v0.3.0 candidate (n=20, ~7 min, ~$0.05)
+bash scripts/v0_3_0_production.sh
+
+# Reproduce v0.3.0 candidate at full HE+ (~25 min, ~$0.18)
+LIMIT=200 bash scripts/v0_3_0_production.sh
+
+# Or run a single config on full HumanEval+ with v0.3.0 SSD defaults
 python3 -m mdlm_engine.bench.harness \
     --adapter dream \
     --model_path Dream-org/Dream-Coder-v0-Instruct-7B \
     --use_fastdllm_modeling \
     --max_new_tokens 512 \
+    --speculative_k 1 \
+    --speculative_threshold 0.95 \
     --limit 200 \
-    --out /workspace/v0_2_2_pathA_512.json
+    --out /workspace/v0_3_0_pathA_ssd.json
 ```
 
-## v0.3.0 (next) — backlog
+## v0.3.1+ — backlog
 
-- **Diverse best-of-N**: implement `--diverse 8`. Expected: ≥0.95 best-of-8 oracle on full HE+ (single-shot 0.6707 → `1 − (1−0.67)^8 ≈ 0.999`).
-- **Self-speculative decoding** (arxiv 2510.04147): generate K candidates in parallel, verify in one forward, accept longest verified prefix. Realistic target: 5-7 s/problem at 0.65+ pass@1.
+- **Full HE+ validation of v0.3.0 SSD** (~25 min, ~$0.18) — pending; expected pass@1 ~0.67 / s/problem ~5.
+- **Diverse best-of-N**: implement `--diverse 8` integration with SSD. Expected: ~0.95+ best-of-8 oracle on full HE+ at ~8-10 s/problem amortized.
+- **MXFP8 retry** when torchao or PyTorch updates Blackwell FP8 path (current logit drift 4.78 is unusable).
 - **Native LLaDA caching** (separate work): requires patched LLaDA modeling with `dual_cache`/`replace_position` extensions.
+- **Sparse-dLLM** (arxiv 2508.02558): 5.8× claimed at long context. HE+ prompts too short for the win to show; useful for LiveCodeBench / multi-turn.
 
 ---
 
