@@ -45,6 +45,33 @@ def _stub_model_config():
     )
 
 
+def _stub_dream_model():
+    """Stub model whose `forward` signature matches a fast_dllm-patched
+    Dream-Coder (PATH A: accepts past_key_values, dual_cache, replace_position).
+
+    Doesn't actually execute — just satisfies the cap-detection introspection.
+    Use this for tests that don't care about the warning (most of them).
+    """
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        use_cache=None,
+        dual_cache=False,
+        replace_position=None,
+    ):
+        raise NotImplementedError("stub")
+
+    model = SimpleNamespace(
+        config=_stub_model_config(),
+        parameters=lambda: iter([]),
+        forward=forward.__get__(SimpleNamespace()),  # bind as method
+    )
+    return model
+
+
 # ---------------------------------------------------------------------------
 # Construction + properties
 # ---------------------------------------------------------------------------
@@ -60,7 +87,7 @@ def test_dream_adapter_registered():
 def test_construction_with_correct_mask_id():
     from mdlm_engine.adapters.dream import DREAM_MASK_TOKEN_ID, DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     tok = _StubTokenizer(mask_id=DREAM_MASK_TOKEN_ID)
     adapter = DreamAdapter(model=model, tokenizer=tok)
 
@@ -73,7 +100,7 @@ def test_construction_with_correct_mask_id():
 def test_construction_warns_on_mismatched_mask_id():
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     tok = _StubTokenizer(mask_id=99999)  # NOT the canonical 151666
     with pytest.warns(RuntimeWarning, match="mask_token_id"):
         adapter = DreamAdapter(model=model, tokenizer=tok)
@@ -88,7 +115,7 @@ def test_construction_raises_when_mask_token_unknown():
         def convert_tokens_to_ids(self, token):
             return 0  # everything maps to UNK
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     with pytest.raises(ValueError, match="<\\|mask\\|>"):
         DreamAdapter(model=model, tokenizer=_BadTok())
 
@@ -104,7 +131,7 @@ def test_shift_logits_is_right_shift_by_one():
     Position 0 stays the same."""
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     L, V = 5, 10
@@ -127,7 +154,7 @@ def test_shift_logits_is_right_shift_by_one():
 def test_build_position_ids_returns_cumsum_minus_one():
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     # 1=real, 0=padding. Padding on the left: positions should be clamped at 0.
@@ -145,7 +172,7 @@ def test_build_position_ids_returns_cumsum_minus_one():
 def test_build_position_ids_returns_none_when_no_attn_mask():
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     assert adapter.build_position_ids(torch.zeros(1, 4, dtype=torch.long), None) is None
@@ -159,7 +186,7 @@ def test_build_position_ids_returns_none_when_no_attn_mask():
 def test_build_attention_mask_is_4d_bidirectional():
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     # 1 real + 1 padding; expect a 2x2 bool mask: [[True, False], [False, False]].
@@ -174,7 +201,7 @@ def test_build_attention_mask_is_4d_bidirectional():
 def test_build_attention_mask_returns_sentinel_when_no_attn_mask():
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     assert adapter.build_attention_mask(None, seq_len=4) == "bidirectional"
@@ -189,7 +216,7 @@ def test_dream_uses_hf_legacy_kv_layout():
     from mdlm_engine.adapters.base import CacheLayout
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     assert adapter.cache_layout() == CacheLayout.HF_LEGACY_KV_BLD
@@ -210,7 +237,7 @@ def test_engine_construction_picks_named_pieces():
     from mdlm_engine import DiffusionEngine
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
 
     engine = DiffusionEngine(
@@ -226,7 +253,7 @@ def test_engine_validates_max_new_tokens_divides_block_length():
     from mdlm_engine import DiffusionEngine
     from mdlm_engine.adapters.dream import DreamAdapter
 
-    model = SimpleNamespace(config=_stub_model_config(), parameters=lambda: iter([]))
+    model = _stub_dream_model()
     adapter = DreamAdapter(model=model, tokenizer=_StubTokenizer())
     engine = DiffusionEngine(model, adapter=adapter)
 

@@ -17,6 +17,8 @@ Target ~150 LOC — measured at end of file.
 """
 from __future__ import annotations
 
+import inspect
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -38,6 +40,66 @@ if TYPE_CHECKING:
 
 DREAM_MASK_TOKEN = "<|mask|>"
 DREAM_MASK_TOKEN_ID = 151666
+
+
+# ---------------------------------------------------------------------------
+# Capability detection
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _DreamCaps:
+    """Which optional kwargs does the loaded Dream model's `forward` accept?
+
+    Drives the cache-wiring path inside ``DreamAdapter.forward``:
+
+    - PATH A: full fast_dllm extensions (``dual_cache`` + ``replace_position``).
+      Use the fastest path with in-place K/V replacement at masked positions.
+    - PATH B: standard HF caching (``past_key_values`` + ``use_cache``) but no
+      fast_dllm extensions. Fall back to alias-based reads only; speedup
+      is smaller but still meaningful.
+    - PATH C: no caching at all. Match v0.1.0 behavior (``use_cache=False``).
+
+    Detection is one-time at adapter construction. ``inspect.signature``
+    is cheap; we keep the result cached on ``self._caps``.
+
+    See ``scripts/day1_phase2/verify_dual_cache.py`` for the spike that
+    surfaces these caps on the actual HF Hub Dream-Coder model.
+    """
+
+    accepts_past_key_values: bool
+    accepts_use_cache: bool
+    accepts_dual_cache: bool
+    accepts_replace_position: bool
+
+    @property
+    def path(self) -> str:
+        """Return ``'A'``, ``'B'``, or ``'C'`` per the docstring above."""
+        if self.accepts_dual_cache and self.accepts_replace_position and self.accepts_past_key_values:
+            return "A"
+        if self.accepts_past_key_values and self.accepts_use_cache:
+            return "B"
+        return "C"
+
+
+def _inspect_dream_caps(model: object) -> _DreamCaps:
+    """Inspect ``model.forward`` and return a ``_DreamCaps`` record.
+
+    Pure read — never calls the model. Safe to run on CPU before weights load.
+    """
+    try:
+        sig = inspect.signature(model.forward)  # type: ignore[attr-defined]
+        params = sig.parameters
+    except (AttributeError, ValueError, TypeError):
+        # Some compiled / quantized models don't expose a clean signature.
+        # Treat as PATH C (no cache support) — engine will fall back.
+        params = {}
+    return _DreamCaps(
+        accepts_past_key_values="past_key_values" in params,
+        accepts_use_cache="use_cache" in params,
+        accepts_dual_cache="dual_cache" in params,
+        accepts_replace_position="replace_position" in params,
+    )
 
 
 @register_adapter("dream")
@@ -63,6 +125,21 @@ class DreamAdapter(ModelAdapter):
                 RuntimeWarning, stacklevel=2,
             )
         self._mask_id = int(mask_id)
+
+        # Detect which cache-wiring path this model supports. Dream's modeling
+        # code may or may not include fast_dllm's `dual_cache` and
+        # `replace_position` extensions — see scripts/day1_phase2/verify_dual_cache.py
+        # for the spike that determines this on a real HF Hub model.
+        self._caps = _inspect_dream_caps(model)
+        if not self._caps.accepts_past_key_values:
+            import warnings
+            warnings.warn(
+                "DreamAdapter: model.forward doesn't accept past_key_values. "
+                "Phase-2 cache wiring will fall back to use_cache=False, "
+                "matching v0.1.0 speed (~10 s/problem). Use a fast_dllm-patched "
+                "Dream-Coder modeling for the v0.2.0 speedup.",
+                RuntimeWarning, stacklevel=2,
+            )
 
     # ------------------------------------------------------------------
     # Vocab properties
@@ -156,26 +233,55 @@ class DreamAdapter(ModelAdapter):
         diffusion_cache: "DiffusionCache | None",
         use_cache: bool,
     ) -> AdapterOutput:
-        """Run one forward pass through Dream. Converts DiffusionCache <-> raw tuple.
+        """Run one forward pass through Dream.
 
-        Phase 1: ``diffusion_cache`` and ``use_cache`` are intentionally ignored
-        — caching is engine-side. The model itself runs with use_cache=False
-        and recomputes its own K/V every forward; the engine controls *which*
-        positions get fed in via active_ids slicing. Model-side cache reuse
-        (passing past_key_values into the model) layers in with the day-7
-        ops module.
+        Cache-wiring path is chosen at construction time via ``self._caps``:
+
+        - **PATH A** (full fast_dllm support): pass ``past_key_values``,
+          ``dual_cache=True``, ``replace_position`` derived from
+          ``~commit_state``. Model writes new K/V in-place at masked positions
+          via fast_dllm's ``past_key[:, replace_indices] = key_states`` pattern
+          (`modeling_dream.py:484-490`). The cache picks up the writes
+          automatically because ``to_legacy_kv()`` returns aliases of the
+          internal ``_K``/``_V`` tensors.
+        - **PATH B** (standard HF caching only): pass ``past_key_values`` +
+          ``use_cache=True`` but skip the fast_dllm extensions. Speedup smaller.
+        - **PATH C** (no caching support): match v0.1.0 behavior. Pass
+          ``use_cache=False``, same forward as before.
         """
-        del diffusion_cache, use_cache  # see docstring
-        kwargs = dict(
+        # Build base kwargs common to all paths.
+        kwargs: dict = dict(
             input_ids=input_ids,
             attention_mask=attention_mask if not isinstance(attention_mask, str) else None,
             position_ids=position_ids,
-            use_cache=False,
         )
+
+        # Decide path: caps + caller's `use_cache` request both must permit caching.
+        wiring = self._caps.path if (use_cache and diffusion_cache is not None) else "C"
+
+        if wiring == "A":
+            kwargs["past_key_values"] = diffusion_cache.to_legacy_kv()  # aliases
+            kwargs["use_cache"] = True
+            kwargs["dual_cache"] = True
+            # replace_position: True at positions the model should recompute
+            # K/V for (= NOT yet committed). commit_state() is True at
+            # frozen/committed positions; invert.
+            kwargs["replace_position"] = ~diffusion_cache.commit_state()
+        elif wiring == "B":
+            # Standard HF caching: pass past_key_values + use_cache=True, no
+            # in-place extension. The model returns concat'd past_key_values;
+            # we write those back via update_from_model_output below.
+            kwargs["past_key_values"] = diffusion_cache.to_legacy_kv()
+            kwargs["use_cache"] = True
+        else:
+            # PATH C: v0.1.0 behavior. No caching.
+            kwargs["use_cache"] = False
+
         out = self.model(**kwargs)
         logits = out.logits if hasattr(out, "logits") else out[0]
         logits = self.shift_logits(logits)
-        return AdapterOutput(logits=logits, past_key_values=None)
+        returned_pkv = getattr(out, "past_key_values", None) if wiring != "C" else None
+        return AdapterOutput(logits=logits, past_key_values=returned_pkv)
 
     # ------------------------------------------------------------------
     # Cache layout
