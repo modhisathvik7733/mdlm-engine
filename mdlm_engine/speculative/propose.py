@@ -188,3 +188,111 @@ def _empty_proposal(device) -> Proposal:
         tokens=torch.empty(0, dtype=torch.long, device=device),
         confidences=torch.empty(0, dtype=torch.float32, device=device),
     )
+
+
+def propose_block_level(
+    block_logits: "torch.Tensor",
+    mask_index: "torch.Tensor",
+    block_start: int,
+    *,
+    confidence_threshold: float,
+    max_proposals: int | None = None,
+) -> Proposal:
+    """Block-level SSD proposal: pick ALL masked positions clearing the
+    confidence threshold, sorted by descending confidence.
+
+    Designed for Redesign A (v0.3.0): runs after the block's init forward
+    but BEFORE the regular sampler/scheduler. This way SSD gets first pick
+    of high-confidence positions, not leftovers from slowfast.
+
+    Differs from ``propose()`` in two ways:
+    1. No top-k cap — proposes every position above threshold. The verify
+       step's longest-prefix-acceptance handles the rejection naturally.
+    2. Leave-one-masked rule still applies (we never propose all positions
+       in the block, so the iter loop has something to do at step 1+).
+
+    Parameters
+    ----------
+    block_logits : ``[B=1, block_len, V]``
+        Init forward's logits sliced to active block, already shift_logits'd.
+    mask_index : ``[B=1, block_len]`` bool
+        True at currently-masked active block positions.
+    block_start : int
+        Absolute index of the first active-block position in state.x.
+    confidence_threshold : float
+        Minimum softmax-max for a position to be proposed. 0.95 is a good
+        default — order-of-commit doesn't affect the model's prediction
+        when it's already 95% sure.
+    max_proposals : int | None
+        Optional hard cap on proposal count (e.g., to bound verify-forward
+        memory at very long blocks). None = no cap, only threshold filters.
+
+    Returns
+    -------
+    Proposal
+        All passing positions, sorted by descending confidence.
+    """
+    import torch
+
+    if confidence_threshold <= 0.0:
+        raise ValueError(
+            f"propose_block_level requires confidence_threshold > 0.0; "
+            f"got {confidence_threshold}. Use propose() for unbounded "
+            f"proposals."
+        )
+
+    B, block_len, V = block_logits.shape
+    if B != 1:
+        return _empty_proposal(block_logits.device)
+
+    proposable = mask_index[0]  # [block_len] bool
+    n_proposable = int(proposable.sum())
+    if n_proposable <= 1:
+        # leave-one-masked rule: need at least 2 masked positions to propose.
+        return _empty_proposal(block_logits.device)
+
+    proposable_block_indices = proposable.nonzero(as_tuple=True)[0]  # [n_proposable]
+    proposable_logits = block_logits[0, proposable_block_indices, :]  # [n_proposable, V]
+    probs = torch.softmax(proposable_logits, dim=-1)
+    top_p, top_tok = probs.max(dim=-1)  # [n_proposable]
+
+    # Threshold filter.
+    keep = top_p >= confidence_threshold
+    if not bool(keep.any()):
+        return _empty_proposal(block_logits.device)
+
+    selected_block_idx = proposable_block_indices[keep]
+    selected_tokens = top_tok[keep]
+    selected_confidences = top_p[keep]
+
+    # Sort by descending confidence so verify's longest-prefix-acceptance
+    # gets the most-confident proposals first.
+    order = torch.argsort(selected_confidences, descending=True)
+    selected_block_idx = selected_block_idx[order]
+    selected_tokens = selected_tokens[order]
+    selected_confidences = selected_confidences[order]
+
+    # Leave-one-masked: never propose ALL masked positions. Drop the
+    # lowest-confidence one if we'd commit everything.
+    n_proposed = int(selected_block_idx.numel())
+    if n_proposed >= n_proposable:
+        # Drop the last (lowest confidence) entry.
+        selected_block_idx = selected_block_idx[:-1]
+        selected_tokens = selected_tokens[:-1]
+        selected_confidences = selected_confidences[:-1]
+
+    # Optional hard cap.
+    if max_proposals is not None and selected_block_idx.numel() > max_proposals:
+        selected_block_idx = selected_block_idx[:max_proposals]
+        selected_tokens = selected_tokens[:max_proposals]
+        selected_confidences = selected_confidences[:max_proposals]
+
+    if selected_block_idx.numel() == 0:
+        return _empty_proposal(block_logits.device)
+
+    selected_positions = selected_block_idx + block_start
+    return Proposal(
+        positions=selected_positions.to(torch.long),
+        tokens=selected_tokens.to(torch.long),
+        confidences=selected_confidences.float(),
+    )

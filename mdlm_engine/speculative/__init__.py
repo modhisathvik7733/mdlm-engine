@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mdlm_engine.speculative.propose import Proposal, propose
+from mdlm_engine.speculative.propose import (
+    Proposal, propose, propose_block_level,
+)
 from mdlm_engine.speculative.verify import VerificationResult, verify
 
 if TYPE_CHECKING:
@@ -98,6 +100,7 @@ __all__ = [
     "Proposal",
     "VerificationResult",
     "propose",
+    "propose_block_level",
     "verify",
     "propose_and_verify",
 ]

@@ -128,12 +128,17 @@ def main(argv: list[str] | None = None) -> int:
                          "0 = disabled (v0.2.x behavior). 4 is a good default "
                          "on Dream-Coder; expect ~1.5-3x speedup at unchanged "
                          "pass@1 when temperature is low.")
-    ap.add_argument("--speculative_threshold", type=float, default=0.99,
+    ap.add_argument("--speculative_threshold", type=float, default=0.95,
                     help="Min top-1 softmax probability for SSD to propose "
-                         "a position. 0.99 default: only commit when the model "
-                         "is near-certain, so commit-order doesn't matter. "
-                         "Lower (0.0) = more proposals, more drift; higher "
-                         "(0.999) = fewer proposals, less drift.")
+                         "a position. 0.95 default: commit only when the "
+                         "model is near-certain so commit-order doesn't "
+                         "matter. Lower (0.0) = more proposals, more drift; "
+                         "higher (0.999) = fewer proposals, less drift.")
+    ap.add_argument("--speculative_per_step", action="store_true",
+                    help="v0.3.0 fallback: use day-1 per-step SSD instead "
+                         "of block-level (Redesign A). Block-level is the "
+                         "default and gives larger speedup; per-step is "
+                         "kept for ablation/comparison.")
     ap.add_argument("--compile", action="store_true", help="enable torch.compile on the model")
     ap.add_argument("--quant", default="", choices=["", "mxfp8", "int8", "int4"])
     ap.add_argument("--use_fastdllm_modeling", action="store_true",
@@ -312,6 +317,7 @@ def _run_benchmark(args, result: BenchResult) -> int:
                     top_p=top_p_cfg,
                     speculative_k=args.speculative_k,
                     speculative_threshold=args.speculative_threshold,
+                    speculative_block_init=not args.speculative_per_step,
                 )
                 total_forwards += out.num_forwards
                 total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
@@ -345,6 +351,7 @@ def _run_benchmark(args, result: BenchResult) -> int:
                 top_p=args.top_p,
                 speculative_k=args.speculative_k,
                 speculative_threshold=args.speculative_threshold,
+                speculative_block_init=not args.speculative_per_step,
             )
             total_forwards += out.num_forwards
             total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])

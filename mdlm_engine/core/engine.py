@@ -137,7 +137,8 @@ class DiffusionEngine:
         top_k: int | None = None,
         confidence_threshold: float = 0.9,
         speculative_k: int = 0,
-        speculative_threshold: float = 0.99,
+        speculative_threshold: float = 0.95,
+        speculative_block_init: bool = True,
         return_trace: bool = False,
     ) -> GenerateOutput:
         """Run masked-diffusion generation.
@@ -199,6 +200,7 @@ class DiffusionEngine:
             confidence_threshold=confidence_threshold,
             speculative_k=speculative_k,
             speculative_threshold=speculative_threshold,
+            speculative_block_init=speculative_block_init,
         )
 
         total_forwards = 0
