@@ -17,6 +17,7 @@ Canonical results log for every tagged release. Each row is a real measurement o
 | v0.3.0 (SSD t=0.90, drift) | 2026-05-04 | 20 | 512 | 3.93 | 57.8 | 0.600 (12/20) | A + SSD (too aggressive) |
 | v0.3.0 (SSD t=0.95) full HE+ | 2026-05-04 | 164 | 512 | 5.74 | 51.2 | 0.6220 (102/164) | A + SSD Redesign C (speed preset) |
 | **v0.3.0 (SSD t=0.99) full HE+** | **2026-05-04** | **164** | **512** | **6.44** | **45.7** | **0.6524 (107/164)** | **A + SSD Redesign C (default)** |
+| v0.3.1 candidate (block=64 + SSD t=0.99) | 2026-05-04 | 20 | 512 | 4.06 | 60.0 | 0.850 (17/20) | A + SSD + block_length=64 |
 
 The n=20 numbers (0.900-0.950) inflated because the first 20 HE+ problems are easy and fit in max_new=256. **The honest baseline is 0.6707 on full HE+ at v0.2.2's defaults.** Slightly above DiffuCoder-7B-cpGRPO's 0.652 published number.
 
@@ -95,6 +96,27 @@ Redesign C runs SSD BEFORE the sampler at every step on the FULL current mask. A
 - `--speculative_k 0` (or omit): v0.2.2 quality (0.6707 / 11.60s)
 - `--speculative_k 1 --speculative_threshold 0.99`: **v0.3.0 default — 1.80× faster, near-lossless** (0.6524 / 6.44s)
 - `--speculative_k 1 --speculative_threshold 0.95`: v0.3.0 speed preset — 2.02× faster, -5 pp (0.6220 / 5.74s)
+
+### v0.3.1 candidate — block_length=64 (n=20 measurement, full HE+ pending)
+
+After v0.3.0 ship, an additional lever was tested: bumping `block_length` 32 → 64 (and `steps_per_block` 32 → 64 to keep total denoising effort similar). Theory: each block needs only one init forward; doubling block size halves init forwards (16 → 8 per problem at max_new=512).
+
+n=20 measurement on fresh 5090 box (instance 36100592, 2026-05-04, **with SSD t=0.99 default still active**):
+
+| metric | v0.3.0 default (block=32, est at n=20) | v0.3.1 candidate (block=64) |
+|---|---:|---:|
+| pass@1 | ~0.80-0.85 (n=20 noise) | **0.850 (17/20)** |
+| s/problem | ~5.5-6.0 | **4.06** |
+| tokens/sec | ~37-40 | **60.0** |
+| total forwards | ~3000 | **2368 (-22%)** |
+| peak VRAM (GB) | 16.06 | 16.11 |
+| GPU utilization | ~60% | ~60% |
+
+**~1.35× additional speedup over v0.3.0 SSD at unchanged quality** (n=20 noise). VRAM essentially unchanged — `block_length` controls the per-step compute window, not memory layout. Cumulative speedup over v0.2.2 baseline: **~2.85× at n=20** (11.60 ÷ 4.06), extrapolated **~2.4-2.6× on full HE+** when validated.
+
+**Why GPU utilization stays at 60%:** at batch=1 the workload is bandwidth-bound (loading 14 GB of weights from HBM dominates). Block-length increase amortizes init forwards but doesn't change the per-forward compute saturation. To exploit the remaining ~15 GB VRAM headroom would require tree speculative decoding (parallel branches within batch dim of one problem) — research-level engineering, deferred to v0.4.0.
+
+**Full HE+ (n=164) validation pending** — expected pass@1 ~0.65 (within 2pp of v0.3.0's 0.6524) at ~4.5-5.0 s/problem. If green, ship as v0.3.1 with `block_length=64` as new default.
 
 ## LLaDA-8B-Base (portability target)
 
