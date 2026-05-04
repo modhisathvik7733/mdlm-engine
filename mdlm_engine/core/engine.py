@@ -138,6 +138,9 @@ class DiffusionEngine:
         confidence_threshold: float = 0.9,
         speculative_k: int = 1,
         speculative_threshold: float = 0.99,
+        speculative_tree_k: int = 1,
+        speculative_band_low: float = 0.97,
+        speculative_max_proposals_branch_1: int = 4,
         return_trace: bool = False,
     ) -> GenerateOutput:
         """Run masked-diffusion generation.
@@ -199,6 +202,9 @@ class DiffusionEngine:
             confidence_threshold=confidence_threshold,
             speculative_k=speculative_k,
             speculative_threshold=speculative_threshold,
+            speculative_tree_k=speculative_tree_k,
+            speculative_band_low=speculative_band_low,
+            speculative_max_proposals_branch_1=speculative_max_proposals_branch_1,
         )
 
         total_forwards = 0

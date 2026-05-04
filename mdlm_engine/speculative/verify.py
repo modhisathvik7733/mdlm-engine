@@ -192,3 +192,87 @@ def _empty_result(device) -> VerificationResult:
         accepted_positions=torch.empty(0, dtype=torch.long, device=device),
         accepted_tokens=torch.empty(0, dtype=torch.long, device=device),
     )
+
+
+def verify_tree(
+    state: "GenerationState",
+    cache: "DiffusionCache",
+    adapter: "ModelAdapter",
+    branches: "list[Proposal]",
+    *,
+    block_start: int,
+    block_end: int,
+    attn_mask_full: "torch.Tensor | str | None" = None,
+    position_ids_full: "torch.Tensor | None" = None,
+    snapshot_between_branches: bool = True,
+) -> "list[VerificationResult]":
+    """Run verify per branch sequentially. Optionally snapshot/restore the
+    cache's active-block K/V between branches so each branch sees a
+    consistent pre-state.
+
+    v0.4.0 tree-spec semantics:
+    - Branch 0 verifies first; its accepted commits MUTATE state.x and
+      cache K/V at the accepted positions.
+    - Branch 1+ verify AFTER branch 0's commits are in state.x. They see
+      richer committed context, which may push some borderline positions
+      above their argmax-match threshold.
+    - Cache K/V at the active block is restored between branches IF
+      ``snapshot_between_branches=True`` (default), so branch 1's verify
+      starts from the same K/V state as a fresh single-branch run would.
+      Branch 0's accepted-position writes still propagate forward via
+      state.x — only K/V is restored, not the committed tokens.
+
+    Why restore K/V but not state.x: PATH A's iter forward computes K/V
+    at active block from state.x's current values. With branch 0's
+    committed tokens in state.x, the next forward will recompute K/V
+    correctly anyway. The restore prevents branch 0's full *speculative*
+    forward (including REJECTED proposed tokens) from contaminating
+    branch 1's logits.
+
+    Returns
+    -------
+    list[VerificationResult]
+        One result per branch, in the same order as ``branches``.
+        Empty branches (``len(proposal) == 0``) get a no-op result with
+        ``n_accepted=0``.
+    """
+    from mdlm_engine.speculative.cache_snapshot import (
+        snapshot_active_block, restore_active_block,
+    )
+
+    if not branches:
+        return []
+
+    results: list[VerificationResult] = []
+
+    # Take snapshot once before any branch runs. Restored before each
+    # branch >= 1 so they all see the same pre-verify cache state.
+    if snapshot_between_branches and len(branches) > 1:
+        pre_verify_snapshot = snapshot_active_block(cache, block_start, block_end)
+    else:
+        pre_verify_snapshot = None
+
+    for branch_idx, proposal in enumerate(branches):
+        if branch_idx > 0 and pre_verify_snapshot is not None:
+            # Restore cache K/V to pre-branch-0 state. state.x retains
+            # branch-0 commits — those are the "borrowed context" that
+            # gives branch 1 its potential speedup.
+            restore_active_block(cache, pre_verify_snapshot)
+
+        if len(proposal) == 0:
+            results.append(_empty_result(state.x.device))
+            continue
+
+        result = verify(
+            state=state,
+            cache=cache,
+            adapter=adapter,
+            proposal=proposal,
+            block_start=block_start,
+            block_end=block_end,
+            attn_mask_full=attn_mask_full,
+            position_ids_full=position_ids_full,
+        )
+        results.append(result)
+
+    return results

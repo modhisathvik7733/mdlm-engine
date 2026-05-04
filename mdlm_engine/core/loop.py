@@ -67,6 +67,16 @@ class LoopConfig:
     # what the sampler would have done. Lossless within sampling noise.
     speculative_threshold: float = 0.99
     confidence_threshold: float = 0.9
+    # v0.4.0 tree speculative decoding. tree_k=1 (default) keeps v0.3.0
+    # single-branch SSD behavior bit-identical. tree_k=2 adds a SECOND
+    # verify forward over positions in [speculative_band_low,
+    # speculative_threshold) — disjoint from branch 0 by construction,
+    # committed only if argmax matches under branch-0's post-commit context.
+    # Lossless because the argmax-match acceptance criterion is the same one
+    # v0.3.0 already relies on.
+    speculative_tree_k: int = 1
+    speculative_band_low: float = 0.97
+    speculative_max_proposals_branch_1: int = 4
 
 
 def generate_block(
@@ -151,40 +161,82 @@ def generate_block(
         # sampling has no other candidates → SSD's argmax-vs-argmax verify
         # picks exactly what the regular sampler would have committed.
         if cfg.speculative_k > 0:
-            from mdlm_engine.speculative import (
-                propose_block_level, verify as _spec_verify,
-            )
-
-            block_proposal = propose_block_level(
-                block_logits=block_logits,
-                mask_index=mask_index,
-                block_start=block_start,
-                confidence_threshold=cfg.speculative_threshold,
-                max_proposals=None,  # threshold filters; no top-k cap
-            )
-            if len(block_proposal) > 0:
-                spec_result = _spec_verify(
-                    state=state,
-                    cache=cache,
-                    adapter=adapter,
-                    proposal=block_proposal,
-                    block_start=block_start,
-                    block_end=block_end,
-                    attn_mask_full=attn_mask,
-                    position_ids_full=position_ids,
+            if cfg.speculative_tree_k > 1:
+                # v0.4.0 tree-spec dispatch: 2-branch position-band tree.
+                from mdlm_engine.speculative import (
+                    propose_tree, verify_tree as _spec_verify_tree,
                 )
-                forwards += 1  # the verification forward
-                if spec_result.n_accepted > 0:
-                    cache.commit(spec_result.accepted_positions)
-                    # Refresh mask_index — SSD wrote accepted tokens into
-                    # state.x, so the regular sampler should skip them.
+
+                branch_0, branch_1 = propose_tree(
+                    block_logits=block_logits,
+                    mask_index=mask_index,
+                    block_start=block_start,
+                    high_threshold=cfg.speculative_threshold,
+                    band_low=cfg.speculative_band_low,
+                    max_proposals_branch_1=cfg.speculative_max_proposals_branch_1,
+                )
+                # Skip tree machinery if both branches empty — saves the
+                # snapshot clone cost.
+                if len(branch_0) > 0 or len(branch_1) > 0:
+                    branches = [branch_0, branch_1]
+                    results = _spec_verify_tree(
+                        state=state,
+                        cache=cache,
+                        adapter=adapter,
+                        branches=branches,
+                        block_start=block_start,
+                        block_end=block_end,
+                        attn_mask_full=attn_mask,
+                        position_ids_full=position_ids,
+                        snapshot_between_branches=True,
+                    )
+                    # Each non-empty branch consumed one verify forward.
+                    for branch_idx, br in enumerate(branches):
+                        if len(br) > 0:
+                            forwards += 1
+                        if results[branch_idx].n_accepted > 0:
+                            cache.commit(results[branch_idx].accepted_positions)
+                    # Refresh mask_index after both branches' commits.
                     active_ids = state.x[:, block_start:block_end]
                     mask_index = active_ids == adapter.mask_token_id
                     if not bool(mask_index.any()):
-                        # Block fully committed by SSD — skip rest of step
-                        # and the outer loop's mask_index.any() guard will
-                        # exit on the next iteration.
                         continue
+            else:
+                # v0.3.0 single-branch SSD path — unchanged.
+                from mdlm_engine.speculative import (
+                    propose_block_level, verify as _spec_verify,
+                )
+
+                block_proposal = propose_block_level(
+                    block_logits=block_logits,
+                    mask_index=mask_index,
+                    block_start=block_start,
+                    confidence_threshold=cfg.speculative_threshold,
+                    max_proposals=None,  # threshold filters; no top-k cap
+                )
+                if len(block_proposal) > 0:
+                    spec_result = _spec_verify(
+                        state=state,
+                        cache=cache,
+                        adapter=adapter,
+                        proposal=block_proposal,
+                        block_start=block_start,
+                        block_end=block_end,
+                        attn_mask_full=attn_mask,
+                        position_ids_full=position_ids,
+                    )
+                    forwards += 1  # the verification forward
+                    if spec_result.n_accepted > 0:
+                        cache.commit(spec_result.accepted_positions)
+                        # Refresh mask_index — SSD wrote accepted tokens into
+                        # state.x, so the regular sampler should skip them.
+                        active_ids = state.x[:, block_start:block_end]
+                        mask_index = active_ids == adapter.mask_token_id
+                        if not bool(mask_index.any()):
+                            # Block fully committed by SSD — skip rest of step
+                            # and the outer loop's mask_index.any() guard will
+                            # exit on the next iteration.
+                            continue
         flat_mask = mask_index.flatten()
         flat_logits = block_logits.reshape(-1, block_logits.shape[-1])[flat_mask]
         confidences, candidates = sampler(

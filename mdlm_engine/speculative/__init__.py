@@ -30,10 +30,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mdlm_engine.speculative.cache_snapshot import (
+    CacheSnapshot, restore_active_block, snapshot_active_block,
+)
 from mdlm_engine.speculative.propose import (
     Proposal, propose, propose_block_level,
 )
-from mdlm_engine.speculative.verify import VerificationResult, verify
+from mdlm_engine.speculative.tree import propose_band, propose_tree
+from mdlm_engine.speculative.verify import (
+    VerificationResult, verify, verify_tree,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -99,8 +105,14 @@ def propose_and_verify(
 __all__ = [
     "Proposal",
     "VerificationResult",
+    "CacheSnapshot",
     "propose",
     "propose_block_level",
+    "propose_band",
+    "propose_tree",
     "verify",
+    "verify_tree",
     "propose_and_verify",
+    "snapshot_active_block",
+    "restore_active_block",
 ]

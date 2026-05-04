@@ -134,6 +134,19 @@ def main(argv: list[str] | None = None) -> int:
                          "sampling settings (-1.83 pp pass@1 measured at full "
                          "HE+, 1.80x speedup). Pass 0.95 for the speed preset "
                          "(2.02x speedup, -4.87 pp).")
+    ap.add_argument("--speculative_tree_k", type=int, default=1,
+                    help="v0.4.0 tree speculative decoding. 1 (default) keeps "
+                         "v0.3.0 single-branch SSD bit-identical. 2 enables a "
+                         "second verify forward over positions in "
+                         "[speculative_band_low, speculative_threshold). "
+                         "Lossless by argmax-match on borrowed branch-0 "
+                         "context.")
+    ap.add_argument("--speculative_band_low", type=float, default=0.97,
+                    help="Tree-spec branch-1 lower confidence bound (default "
+                         "0.97). Only used when --speculative_tree_k > 1.")
+    ap.add_argument("--speculative_max_proposals_branch_1", type=int, default=4,
+                    help="Cap on tree-spec branch-1 proposals per step "
+                         "(default 4). Bounds branch-1 verify-forward cost.")
     ap.add_argument("--compile", action="store_true", help="enable torch.compile on the model")
     ap.add_argument("--quant", default="", choices=["", "mxfp8", "int8", "int4"])
     ap.add_argument("--use_fastdllm_modeling", action="store_true",
@@ -312,6 +325,9 @@ def _run_benchmark(args, result: BenchResult) -> int:
                     top_p=top_p_cfg,
                     speculative_k=args.speculative_k,
                     speculative_threshold=args.speculative_threshold,
+                    speculative_tree_k=args.speculative_tree_k,
+                    speculative_band_low=args.speculative_band_low,
+                    speculative_max_proposals_branch_1=args.speculative_max_proposals_branch_1,
                 )
                 total_forwards += out.num_forwards
                 total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
@@ -345,6 +361,9 @@ def _run_benchmark(args, result: BenchResult) -> int:
                 top_p=args.top_p,
                 speculative_k=args.speculative_k,
                 speculative_threshold=args.speculative_threshold,
+                speculative_tree_k=args.speculative_tree_k,
+                speculative_band_low=args.speculative_band_low,
+                speculative_max_proposals_branch_1=args.speculative_max_proposals_branch_1,
             )
             total_forwards += out.num_forwards
             total_tokens += int(out.sequences.shape[1] - prompt_ids.shape[1])
