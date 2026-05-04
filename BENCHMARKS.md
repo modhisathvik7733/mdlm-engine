@@ -17,7 +17,8 @@ Canonical results log for every tagged release. Each row is a real measurement o
 | v0.3.0 (SSD t=0.90, drift) | 2026-05-04 | 20 | 512 | 3.93 | 57.8 | 0.600 (12/20) | A + SSD (too aggressive) |
 | v0.3.0 (SSD t=0.95) full HE+ | 2026-05-04 | 164 | 512 | 5.74 | 51.2 | 0.6220 (102/164) | A + SSD Redesign C (speed preset) |
 | **v0.3.0 (SSD t=0.99) full HE+** | **2026-05-04** | **164** | **512** | **6.44** | **45.7** | **0.6524 (107/164)** | **A + SSD Redesign C (default)** |
-| v0.3.1 candidate (block=64 + SSD t=0.99) | 2026-05-04 | 20 | 512 | 4.06 | 60.0 | 0.850 (17/20) | A + SSD + block_length=64 |
+| v0.3.1 candidate (block=64 + SSD t=0.99) | 2026-05-04 | 20 | 512 | 4.06 | 60.0 | 0.850 (17/20) | A + SSD + block_length=64 (n=20 inflated) |
+| **v0.3.1 candidate (block=64) full HE+** | **2026-05-04** | **164** | **512** | **4.76** | **58.6** | **0.6037 (99/164)** | A + SSD + block=64 — **quality regression -4.87pp vs v0.3.0; not shipped** |
 
 The n=20 numbers (0.900-0.950) inflated because the first 20 HE+ problems are easy and fit in max_new=256. **The honest baseline is 0.6707 on full HE+ at v0.2.2's defaults.** Slightly above DiffuCoder-7B-cpGRPO's 0.652 published number.
 
@@ -116,7 +117,21 @@ n=20 measurement on fresh 5090 box (instance 36100592, 2026-05-04, **with SSD t=
 
 **Why GPU utilization stays at 60%:** at batch=1 the workload is bandwidth-bound (loading 14 GB of weights from HBM dominates). Block-length increase amortizes init forwards but doesn't change the per-forward compute saturation. To exploit the remaining ~15 GB VRAM headroom would require tree speculative decoding (parallel branches within batch dim of one problem) — research-level engineering, deferred to v0.4.0.
 
-**Full HE+ (n=164) validation pending** — expected pass@1 ~0.65 (within 2pp of v0.3.0's 0.6524) at ~4.5-5.0 s/problem. If green, ship as v0.3.1 with `block_length=64` as new default.
+**Full HE+ (n=164) validation result (2026-05-04):**
+
+| metric | v0.3.0 default (block=32) | v0.3.1 candidate (block=64) | Δ |
+|---|---:|---:|---:|
+| pass@1 | 0.6524 | **0.6037** | **-4.87 pp** |
+| s/problem | 6.44 | **4.76** | **1.35× faster** |
+| speedup vs v0.2.2 | 1.80× | 2.44× | — |
+
+**Quality regression too large to ship as default.** The n=20 result (0.85) was sample-size inflation; full HE+ exposed a real ~5 pp pass@1 cost. Together with v0.3.0's existing -2 pp, total drop from v0.2.2 baseline would be -7 pp — not acceptable for a default.
+
+**Why block_length=64 actually hurts quality:** Dream-Coder was trained at block_length=32. Pushing to 64 is off-distribution: more masked positions per block means each commit decision happens with less peer-context resolved; cross-position dependencies (e.g., `def func(args):\n    return X` patterns spanning >32 tokens) become harder to resolve consistently. `steps_per_block=64` doesn't fully compensate because quality scales sub-linearly with steps.
+
+**Decision: do NOT ship block_length=64 as default.** v0.3.0's `block_length=32 + SSD t=0.99` remains the shipped Pareto frontier (1.80× speedup, -1.83 pp). Users who explicitly want max speed and can absorb 5+ pp pass@1 cost can opt in via `--block_length 64 --steps_per_block 64`.
+
+The remaining cheap-lever budget is exhausted. Next real speedup levers (tree speculative decoding, distillation) are dedicated v0.4.0+ projects.
 
 ## LLaDA-8B-Base (portability target)
 
